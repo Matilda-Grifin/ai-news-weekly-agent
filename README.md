@@ -1,86 +1,87 @@
-# AI 资讯周报 Agent（开源项目说明）
+# AI Weekly Insights Agent (Open-Source Project Overview)
 
-这个项目用于每周自动汇总 AI 圈的高价值信息，输出一份中文可读、结构化、可追溯的 Markdown 周报，并支持以 OpenClaw Skill 形式运行。
-
----
-
-## 项目目标
-
-解决三个实际问题：
-
-- 信息太散：官方新闻、行业媒体、论文、开源动态分布在不同平台
-- 信息太杂：同质内容多、噪声高、难以持续跟踪
-- 输出不稳定：很多工具能抓取，但难产出长期可读的周报
-
-因此本项目聚焦“稳定产出周报”，而不是做重型资讯平台。
+This project automatically compiles high-value AI updates every week and outputs a readable, structured, and traceable Markdown weekly report. It can also run in OpenClaw Skill form.
 
 ---
 
-## 当前功能（v1）
+## Project Goals
 
-- 周报时间窗默认 7 天（`168h`）
-- 自动聚合：官方发布、行业资讯、开源动态、论文研究、OpenClaw 热榜
-- 论文占比控制（默认上限 20%）
-- 每条保留来源链接与发布日期
-- OpenClaw 热榜输出 Top 3（排名、发布者、用途、链接）
-- 使用 LLM 生成中文长文解读（尽量 200 字以上）
-- 产出路径：`daily_docs/ai_weekly_YYYYMMDD.md`
+This project is designed to solve three practical problems:
 
----
+- Information is scattered: official announcements, industry media, papers, and open-source updates are spread across many platforms.
+- Information is noisy: duplicate content is common, signal-to-noise ratio is low, and tracking consistency is difficult.
+- Output is unstable: many tools can fetch data, but few can consistently produce readable weekly reports.
 
-## 产出策略
-
-- 新闻优先：优先保留官方和行业新闻
-- 论文限流：默认论文不超过 20%
-- 官方补位：官方新闻不足时使用更宽窗口补齐
-- 可追溯：正文与链接区都保留发布日期
-- 异常可见：抓取失败会记录到“抓取异常”章节
+So this project focuses on **stable weekly output**, not on building a heavyweight news platform.
 
 ---
 
-## OpenClaw Skill 形式
-推荐触发方式：
+## Current Features (v1)
 
-- `生成AI周报`
-- `生成本周周报`
-- `刷新OpenClaw热榜`
+- Default weekly time window: 7 days (`168h`)
+- Automatic aggregation of: official announcements, industry news, open-source updates, research papers, and OpenClaw leaderboard
+- Paper ratio control (default max: 20%)
+- Source link and publish date preserved for each item
+- OpenClaw leaderboard Top 3 output (rank, author, purpose, link)
+- LLM-generated long-form Chinese interpretation (target: 200+ characters)
+- Output path: `daily_docs/ai_weekly_YYYYMMDD.md`
 
-推荐执行命令：
+---
+
+## Output Strategy
+
+- News first: prioritize official and industry news
+- Paper throttling: papers are capped at 20% by default
+- Official backfill: widen the fetch window when official news is insufficient
+- Traceability: publish date appears in both body and links section
+- Visible errors: fetch failures are recorded under a dedicated "Fetch Errors" section
+
+---
+
+## OpenClaw Skill Mode
+
+Recommended triggers:
+
+- `Generate AI weekly report`
+- `Generate this week's report`
+- `Refresh OpenClaw leaderboard`
+
+Recommended command:
 
 ```bash
 python3 run_daily_digest.py --use-llm --window-hours 168 --max-paper-ratio 0.2 --min-official-items 3
 ```
 
-输出文件：
+Output file:
 
 - `daily_docs/ai_weekly_YYYYMMDD.md`
 
 ---
 
-## 环境变量与密钥安全
+## Environment Variables and Key Security
 
-本项目支持两种配置方式：
+This project supports two configuration approaches:
 
-1. 用户本地 `.env`
-2. OpenClaw 运行环境注入变量
+1. Local user `.env`
+2. Environment variable injection from OpenClaw runtime
 
-必填变量：
+Required:
 
 - `ARK_API_KEY`
-- `ARK_ENDPOINT_ID`（推荐）
+- `ARK_ENDPOINT_ID` (recommended)
 
-可选变量：
+Optional:
 
 - `ARK_MODEL`
 - `DIGEST_WEBHOOK_URL`
 
-开源安全约定：
+Open-source security conventions:
 
-- 仓库不提交真实 `.env`
-- 仓库只提交 `.env.example`
-- `.gitignore` 默认忽略 `.env` 与生成文件
+- Never commit a real `.env`
+- Commit only `.env.example`
+- `.gitignore` should exclude `.env` and generated report files
 
-`.env.example` 示例：
+`.env.example`:
 
 ```env
 ARK_API_KEY=your_ark_api_key_here
@@ -89,11 +90,11 @@ ARK_MODEL=model_name
 DIGEST_WEBHOOK_URL=
 ```
 
-> 说明：真实 key 只应存在于运行环境，不应进入仓库、日志、截图或 issue。
+> Real keys should exist only in runtime environments and must never appear in repositories, logs, screenshots, or issues.
 
 ---
 
-## 仓库结构建议
+## Suggested Repository Structure
 
 ```text
 ai-weekly-agent/
@@ -109,26 +110,25 @@ ai-weekly-agent/
 
 ---
 
-## 快速开始
+## Quick Start
 
 ```bash
 python3 run_daily_digest.py --use-llm
 ```
 
-常用参数：
+Common parameters:
 
-- `--window-hours 168`：周报时间窗（默认）
-- `--max-paper-ratio 0.2`：论文占比上限
-- `--min-official-items 3`：官方新闻最小目标条数
-- `--focus-skill "tavily"`：追踪某个 OpenClaw skill 排名
+- `--window-hours 168`: weekly time window (default)
+- `--max-paper-ratio 0.2`: upper bound for paper ratio
+- `--min-official-items 3`: minimum target count for official news
+- `--focus-skill "tavily"`: track ranking for a specific OpenClaw skill
 
+### Source Categories
 
-### 信源：
-
-1. **官方发布类**：OpenAI、Anthropic、Google AI、Meta AI、Microsoft AI 等官方 Blog
-2. **研究论文类**：arXiv（cs.AI/cs.CL/cs.CV）、Papers with Code、Semantic Scholar 热门
-3. **代码与开源类**：GitHub Trending、Hugging Face Trending、Awesome 系列仓库
-4. **行业媒体类**：TechCrunch AI、The Verge AI、VentureBeat AI、MIT Tech Review AI
-5. **社区讨论类**：Reddit（r/MachineLearning 等）、Hacker News、X（Twitter）列表
-6. **中文资讯类**：机器之心、量子位、新智元、36Kr AI 相关栏目
-7. **国内官方模型类**：国内大模型厂商官网、开发者平台、官方公众号
+1. **Official Announcements**: OpenAI, Anthropic, Google AI, Meta AI, Microsoft AI official blogs
+2. **Research Papers**: arXiv (cs.AI/cs.CL/cs.CV), Papers with Code, Semantic Scholar trending
+3. **Code & Open Source**: GitHub Trending, Hugging Face Trending, Awesome repositories
+4. **Industry Media**: TechCrunch AI, The Verge AI, VentureBeat AI, MIT Tech Review AI
+5. **Community Discussion**: Reddit (r/MachineLearning, etc.), Hacker News, X (Twitter) lists
+6. **Chinese AI Media**: Jiqizhixin, QbitAI, Xinzhiyuan, 36Kr AI columns
+7. **China Official Model Sources**: official pages, developer platforms, and official social channels of domestic foundation model vendors
