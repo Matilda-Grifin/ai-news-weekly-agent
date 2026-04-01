@@ -1,6 +1,9 @@
 streamlit
 langchain
 langchain-openai
+httpx
 langgraph
 mcp
 langchain-mcp-adapters
+pydantic>=2
+trafilatura>=1.6.0

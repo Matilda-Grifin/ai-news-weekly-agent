@@ -67,8 +67,43 @@ def _infer_plan(user_intent: str) -> tuple[dict, list[str]]:
         plan["detail_level"] = "deep"
     if "快讯" in text or "简报" in text:
         plan["detail_level"] = "brief"
+    if any(k in text for k in ["openclaw", "topclaw", "技能榜", "榜单", "skill"]):
+        tasks.insert(2, "检测到榜单需求，调用 OpenClaw 榜单 skill")
     plan["topic_hint"] = user_intent[:80]
     return plan, tasks
+
+
+def _extract_focus_skill(user_text: str) -> str:
+    text = (user_text or "").strip()
+    if not text:
+        return ""
+    if not any(k in text.lower() for k in ["openclaw", "topclaw", "技能榜", "榜单", "skill"]):
+        return ""
+    cleaned = text
+    for token in ["openclaw", "OpenClaw", "topclaw", "TopClaw", "技能榜", "榜单", "skill", "排名", "排行", "查询", "查看"]:
+        cleaned = cleaned.replace(token, " ")
+    cleaned = " ".join(cleaned.split())
+    return cleaned[:60]
+
+
+def _step_label(name: str) -> str:
+    mapping = {
+        "intent_plan": "识别用户意图并规划抓取任务",
+        "load_sources": "解析用户意图并抽取关注主题",
+        "collect_plan": "按规划筛选信源与抓取范围",
+        "collect_news": "按系统内置信源抓取最近窗口内资讯",
+        "gnews_search": "LLM 抽取搜索词并调用 GNews",
+        "gnews_intent_gap": "意图未命中时补充 GNews 关键词检索",
+        "fetch_article_body": "抓取原文链接正文（trafilatura）",
+        "collect_filter": "按意图过滤抓取结果",
+        "intent_rank": "按用户意图匹配并重排资讯",
+        "official_backfill": "补充官方发布资讯",
+        "balance_items": "去重、分组并做重要性排序",
+        "openclaw": "抓取 OpenClaw 热榜",
+        "llm_enrich": "按偏好生成中文摘要与解读",
+        "render_and_write": "输出报告并保留可追踪历史",
+    }
+    return mapping.get(name, name)
 
 
 if "chat_messages" not in st.session_state:
@@ -79,6 +114,8 @@ if "ARK_API_KEY" not in st.session_state and os.getenv("ARK_API_KEY"):
     st.session_state["ARK_API_KEY"] = os.getenv("ARK_API_KEY", "")
 if "OPENAI_API_KEY" not in st.session_state and os.getenv("OPENAI_API_KEY"):
     st.session_state["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY", "")
+if "GNEWS_API_KEY" not in st.session_state and os.getenv("GNEWS_API_KEY"):
+    st.session_state["GNEWS_API_KEY"] = os.getenv("GNEWS_API_KEY", "")
 
 with st.sidebar:
     st.header("运行设置")
@@ -91,8 +128,10 @@ with st.sidebar:
     llm_provider = st.selectbox("LLM Provider", ["ark", "openai-compatible"], index=0)
     llm_base_url = ""
     ark_model = ""
+    ark_endpoint_id = ""
     openai_model = ""
     if llm_provider == "ark":
+        ark_endpoint_id = st.text_input("ARK Endpoint ID（推荐，形如 ep-xxx）", value="")
         ark_model = st.text_input("ARK Model", value="Doubao-Seed-1.6-lite")
         ark_api_key = st.text_input("ARK_API_KEY", value="", type="password")
         openai_api_key = ""
@@ -101,11 +140,38 @@ with st.sidebar:
         openai_model = st.text_input("OpenAI Model", value="gpt-4o-mini")
         openai_api_key = st.text_input("OPENAI_API_KEY", value="", type="password")
         ark_api_key = ""
+
+    st.header("GNews（建议开启）")
+    _gnews_default = bool(
+        (st.session_state.get("GNEWS_API_KEY") or os.getenv("GNEWS_API_KEY", "")).strip()
+    )
+    gnews_enabled = st.checkbox(
+        "启用 GNews（优先与 RSS 合并展示，GNews 在前）",
+        value=_gnews_default,
+        help="需填写 GNEWS_API_KEY；搜索词由 LLM 从聊天中抽取",
+    )
+    gnews_api_key = st.text_input(
+        "GNEWS_API_KEY",
+        value=st.session_state.get("GNEWS_API_KEY", ""),
+        type="password",
+        help="https://gnews.io ；可与下方「确认保存」一并写入会话",
+    )
+    gnews_lang = st.selectbox("GNews 语言", ["en", "zh"], index=0)
+    gnews_max = st.slider("GNews 最多条数", min_value=1, max_value=20, value=10)
+    strict_intent_match = st.checkbox(
+        "仅展示与搜索关键词相关的条目（严格）",
+        value=True,
+        help="关闭后：关键词未命中时仍会展示时间序资讯（不推荐）",
+    )
+
     if st.button("确认保存 API 配置", use_container_width=True):
         if ark_api_key:
             st.session_state["ARK_API_KEY"] = ark_api_key
         if openai_api_key:
             st.session_state["OPENAI_API_KEY"] = openai_api_key
+        if gnews_api_key.strip():
+            st.session_state["GNEWS_API_KEY"] = gnews_api_key.strip()
+            os.environ["GNEWS_API_KEY"] = gnews_api_key.strip()
         st.session_state["api_ready"] = True
     if st.session_state.get("api_ready"):
         st.success("API 配置已确认，可开始对话执行")
@@ -157,6 +223,9 @@ if user_text:
         os.environ["ARK_API_KEY"] = st.session_state["ARK_API_KEY"]
     if st.session_state.get("OPENAI_API_KEY"):
         os.environ["OPENAI_API_KEY"] = st.session_state["OPENAI_API_KEY"]
+    if gnews_api_key.strip():
+        st.session_state["GNEWS_API_KEY"] = gnews_api_key.strip()
+        os.environ["GNEWS_API_KEY"] = gnews_api_key.strip()
 
     if use_llm:
         if llm_provider == "ark":
@@ -183,9 +252,6 @@ if user_text:
                 st.stop()
 
     plan, plan_tasks = _infer_plan(user_text)
-    plan_text = "我已拆解任务，开始执行：\n" + "\n".join([f"{i+1}. {t}" for i, t in enumerate(plan_tasks)])
-    st.session_state["chat_messages"].append({"role": "assistant", "content": plan_text})
-    st.chat_message("assistant").write(plan_text)
 
     runs_dir = "runs"
     out_dir = "daily_docs"
@@ -199,17 +265,29 @@ if user_text:
         "official_window_hours": window_hours,
         "max_paper_ratio": 0.2,
         "min_official_items": 3,
-        "focus_skill": "",
+        "focus_skill": _extract_focus_skill(user_text),
+        "intent_text": user_text,
+        "enable_openclaw": any(
+            key in user_text.lower() for key in ["openclaw", "topclaw", "技能榜", "榜单", "skill"]
+        ),
         "use_llm": use_llm,
         "llm_provider": llm_provider,
         "llm_base_url": llm_base_url.strip(),
         "ark_model": ark_model.strip(),
-        "ark_endpoint_id": "",
+        "ark_endpoint_id": ark_endpoint_id.strip(),
         "ark_api_key": st.session_state.get("ARK_API_KEY", ""),
         "allow_custom_llm_endpoint": False,
         # Local compatibility: macOS Python cert chain may be missing.
         # Keep pipeline available by enabling SSL fallback in app mode.
         "allow_insecure_ssl": True,
+        "llm_prompt_variant": "auto",
+        "pipeline_log": True,
+        "gnews_enabled": gnews_enabled,
+        "gnews_api_key": (gnews_api_key or st.session_state.get("GNEWS_API_KEY", "") or "").strip(),
+        "gnews_lang": gnews_lang,
+        "gnews_max": int(gnews_max),
+        "gnews_category": "行业资讯",
+        "strict_intent_match": bool(strict_intent_match),
     }
     if llm_provider == "openai-compatible" and openai_model.strip():
         os.environ["OPENAI_MODEL"] = openai_model.strip()
@@ -217,9 +295,16 @@ if user_text:
     with st.status("Agent 正在执行...", expanded=True) as status:
         def _progress_cb(step: dict) -> None:
             icon_map = {"started": "⏳", "ok": "✅", "warn": "⚠️"}
-            icon = icon_map.get(step.get("status", ""), "•")
-            name = step.get("name", "step")
+            step_status = step.get("status", "")
+            icon = icon_map.get(step_status, "•")
+            name = _step_label(step.get("name", "step"))
             detail = (step.get("detail") or "").strip()
+            if step_status == "started":
+                status.update(label=f"进行中：{name}", state="running")
+            elif step_status == "ok":
+                status.update(label=f"已完成：{name}", state="running")
+            elif step_status == "warn":
+                status.update(label=f"告警：{name}", state="running")
             status.write(f"{icon} {name}" + (f" - {detail}" if detail else ""))
 
         config["_progress_cb"] = _progress_cb
@@ -232,7 +317,7 @@ if user_text:
         reply = f"已完成：共抓取 {result.get('items', 0)} 条。\n报告路径：`{doc_path}`"
         if doc_path.exists():
             md = doc_path.read_text(encoding="utf-8")
-            preview = md[:1500]
+            preview = md
             reply += f"\n\n报告预览：\n\n{preview}"
         st.session_state["chat_messages"].append({"role": "assistant", "content": reply})
         st.chat_message("assistant").write(reply)
@@ -247,6 +332,8 @@ if user_text:
             "llm_provider": llm_provider,
             "mcp_tools": mcp_tools,
             "intent": user_text,
+            "execution_mode": "langgraph",
+            "execution_route": "langgraph",
             "plan": plan,
             "api_keys": {
                 "ark": _mask_key(st.session_state.get("ARK_API_KEY", "")),

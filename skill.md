@@ -6,6 +6,12 @@ Generate a weekly AI report in Markdown, including OpenClaw top skills, official
 - User asks for weekly AI digest/report
 - User wants OpenClaw skills ranking + AI news summary
 
+## Skill routing (project agent)
+- Default route: run news digest pipeline only (RSS/news collection + report generation)
+- OpenClaw route: only when user intent explicitly mentions keywords like `openclaw`, `topclaw`, `技能榜`, `榜单`, `skill`
+- When OpenClaw route is active, agent calls OpenClaw ranking capability and injects ranking result into report
+- If user does not mention OpenClaw ranking intent, do not fetch or render OpenClaw section
+
 ## Command
 ```bash
 python3 run_daily_digest.py --use-llm --llm-provider auto --window-hours 168 --max-paper-ratio 0.2 --min-official-items 3
