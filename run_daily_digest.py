@@ -402,6 +402,7 @@ def call_chat_completion(
     messages: list[dict],
     base_url: str,
     timeout: int = 90,
+    allow_insecure_fallback: bool = False,
 ) -> str:
     payload = {
         "model": model,
@@ -418,8 +419,26 @@ def call_chat_completion(
         },
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=timeout, context=ssl.create_default_context()) as resp:
-        body = resp.read().decode("utf-8", errors="ignore")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=ssl.create_default_context()) as resp:
+            body = resp.read().decode("utf-8", errors="ignore")
+    except ssl.SSLCertVerificationError:
+        if not allow_insecure_fallback:
+            raise
+        with urllib.request.urlopen(
+            req, timeout=timeout, context=ssl._create_unverified_context()
+        ) as resp:
+            body = resp.read().decode("utf-8", errors="ignore")
+    except urllib.error.URLError as ex:
+        if not allow_insecure_fallback:
+            raise
+        if isinstance(ex.reason, ssl.SSLCertVerificationError):
+            with urllib.request.urlopen(
+                req, timeout=timeout, context=ssl._create_unverified_context()
+            ) as resp:
+                body = resp.read().decode("utf-8", errors="ignore")
+        else:
+            raise
     data = json.loads(body)
     try:
         return data["choices"][0]["message"]["content"]
@@ -578,6 +597,7 @@ def enrich_items_with_llm(
         api_key=api_key,
         model=model,
         base_url=base_url,
+        allow_insecure_fallback=allow_insecure_fallback,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": json.dumps(user_prompt, ensure_ascii=False)},

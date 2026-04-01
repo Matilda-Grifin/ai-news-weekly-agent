@@ -178,3 +178,42 @@ Common parameters:
 5. **Community Discussion**: Reddit (r/MachineLearning, etc.), Hacker News, X (Twitter) lists
 6. **Chinese AI Media**: Jiqizhixin, QbitAI, Xinzhiyuan, 36Kr AI columns
 7. **China Official Model Sources**: official pages, developer platforms, and official social channels of domestic foundation model vendors
+
+---
+
+## Phase-Based Implementation (Now Included)
+
+### Phase 1: Streamlit UI (Runnable First Version)
+
+- Added `app.py` for interactive front-end.
+- Keeps existing `run_daily_digest.py` core logic.
+- UI supports parameter input, trigger run, markdown preview, and download.
+- Users can input their own API keys in UI session memory.
+
+Run:
+
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+### Phase 2: Agentization with LangChain + LangGraph
+
+- Added `agent_runtime.py`: wraps current digest logic into reusable pipeline function.
+- Added `langgraph_agent.py`: stateful graph with retry path (`run -> retry -> persist -> end`).
+- Existing logic is reused directly (fetch, filter, summarize, render).
+
+### Phase 3: MCP + Observability + History
+
+- Added `mcp_bridge.py`: MCP config discovery + run history writer.
+- Added `mcp_servers.example.json`: example MCP server definitions (search/storage).
+- Added run trace files under `runs/<run_id>/trace.json`.
+- Added global history log `runs/history.jsonl` for recent runs.
+
+To enable MCP, copy:
+
+```bash
+cp mcp_servers.example.json mcp_servers.json
+```
+
+Then update command/env based on your local MCP servers.
