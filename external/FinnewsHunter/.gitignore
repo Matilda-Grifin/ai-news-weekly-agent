@@ -1,0 +1,28 @@
+# Development documentation (local only, not for Git)
+devlogs/
+conclusions/
+researches/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+node_modules/
+**/node_modules/backend/celerybeat-schedule*
+backend/.crawl_cache/
+backend/celerybeat-schedule
+backend/reproduce_sina.py
+backend/checkpoints/

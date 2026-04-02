@@ -1,0 +1,23 @@
+[
+  {
+    "url": "https://zhuanlan.zhihu.com/p/2013355209838055854",
+    "method": "playwright_trafilatura",
+    "chars": 117,
+    "path": "/Users/SL/Desktop/ai_news_skill/test_harness_crawl/out/zhuanlan.zhihu.com_p_2013355209838055854.md",
+    "note": " | llm: HTTP Error 404: Not Found"
+  },
+  {
+    "url": "https://devblogs.microsoft.com/agent-framework/agent-harness-in-agent-framework/",
+    "method": "playwright_trafilatura",
+    "chars": 11885,
+    "path": "/Users/SL/Desktop/ai_news_skill/test_harness_crawl/out/devblogs.microsoft.com_agent-framework_agent-harness-in-agent-framework.md",
+    "note": ""
+  },
+  {
+    "url": "https://martinfowler.com/articles/exploring-gen-ai/harness-engineering.html",
+    "method": "playwright_trafilatura",
+    "chars": 7145,
+    "path": "/Users/SL/Desktop/ai_news_skill/test_harness_crawl/out/martinfowler.com_articles_exploring-gen-ai_harness-engineering.html.md",
+    "note": ""
+  }
+]

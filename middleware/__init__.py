@@ -1,1 +1,0 @@
-"""Pipeline middleware (logging, timing)."""
