@@ -142,7 +142,12 @@ def crawl_one(url: str, out_dir: pathlib.Path, *, use_llm_fallback: bool) -> dic
                     from run_daily_digest import fetch_text
 
                     try:
-                        html2 = fetch_text(url, timeout=25, allow_insecure_fallback=True)
+                        html2 = fetch_text(
+                            url,
+                            timeout=25,
+                            allow_insecure_fallback=True,
+                            proxy_scope="site_crawler",
+                        )
                     except Exception as ex:  # noqa: BLE001
                         result["note"] = (result.get("note") or "") + f" | fetch_text: {ex}"
                 if html2:

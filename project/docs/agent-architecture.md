@@ -2,9 +2,17 @@
 
 > **说明**：本仓库是「资讯周报 / 日报」编排型 Agent：**主路径**为 LangGraph 状态机 + `agent_runtime` 流水线；**可选路径**为 LangChain Tool-Calling，失败时回退 LangGraph。
 
+**Documentation map（与根目录中文总览的关系）**
+
+| 文档 | 职责 | 维护方式 |
+|------|------|----------|
+| [`项目架构说明.md`](../../项目架构说明.md)（仓库根） | 中文：树状目录、模块表、数据流简图 | **唯一正文**：改架构时只改此文件中的总览部分 |
+| [`PROJECT-ARCHITECTURE-ZH.md`](../../PROJECT-ARCHITECTURE-ZH.md)（仓库根） | 纯 ASCII 入口，链到上一文件 | **勿写重复正文**，仅跳转说明 |
+| **本文件** `project/docs/agent-architecture.md` | 英文：分层图、阶段细节、Tool 与状态 | 与代码同步时在此更新；重大结构变更请同时检查根目录 `项目架构说明.md` |
+
 路径可以记成：
 
-用户一句话 → `intent_text`（以及 focus_skill / enable_openclaw 等）→ `run_with_graph` → **intent**：`intent_plan_stage`（**可选 LLM** 将意图拆成多条检索短语；失败时按逗号分句规则回退）→ **collect**：**站点定制爬虫（优先）→ RSS（兜底）** → **按短语分别 GNews**（可关）→ **按短语 Playwright 搜 Google HK**（可选，见 `ai_news_skill/crawlers/google_hk_playwright.py`）→ 内联 `openclaw_stage` → enrich → write → persist。
+用户一句话 → `intent_text`（以及 focus_skill / enable_openclaw 等）→ `run_with_graph` → **intent**：`intent_plan_stage`（**可选 LLM** 将意图拆成多条检索短语；失败时按逗号分句规则回退）→ **collect**：**站点定制爬虫（优先）→ RSS（兜底）** → **按短语分别 GNews**（可关）→ 内联 `openclaw_stage` → enrich → write → persist。
 
 **语言**：中文
 
@@ -20,7 +28,7 @@
 - [Tool System](#tool-system)
 - [State & Persistence](#state--persistence)
 - [Stage Details（分步说明）](#stage-details分步说明)
-- [Intent → 多关键词与 Google HK](#intent--多关键词与-google-hk)（含 Playwright 镜像安装）
+- [Intent → 多关键词与 Playwright（站点爬虫）](#intent--多关键词与-playwright站点爬虫)
 - [Optional: Tool-Calling Route](#optional-tool-calling-route)
 
 ---
@@ -66,7 +74,7 @@
                               ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                         EXTERNAL / IO                                    │
-│  sources.json + 站点爬虫    GNews API    （可选）Google HK / Playwright  │
+│  sources.json + 站点爬虫（Playwright）    GNews API                        │
 │  OpenClaw 榜单         Ark/OpenAI LLM（意图拆词 + enrich）                 │
 │  runs/<run_id>/trace.json    daily_docs/*.md    runs/history.jsonl       │
 └─────────────────────────────────────────────────────────────────────────┘
@@ -91,7 +99,7 @@
     intent_plan_stage ──> keywords[]（LLM JSON 或逗号分句回退）, prefer_categories…
        │
        ▼
-    collect_stage ──────> 站点爬虫优先 → RSS 兜底 → GNews 按短语分别请求（可配置）→ 可选 Google HK
+    collect_stage ──────> 站点爬虫优先 → RSS 兜底 → GNews 按短语分别请求（可配置）
        │                    → 关键词过滤 / 官方回填
        │
        ▼
@@ -127,7 +135,6 @@ ai_news_skill/
 ├── agent_tool_runner.py        # Tool-Calling 编排 + 回退 LangGraph
 ├── run_daily_digest.py         # RSS、GNews、LLM enrich、Markdown 渲染等具体实现
 ├── digest_tools.py             # LangChain @tool 注册（DIGEST_AGENT_TOOLS）
-├── ai_news_skill/crawlers/google_hk_playwright.py  # 可选：Playwright 抓取 google.com.hk SERP（根目录保留 wrapper）
 ├── scripts/test_intent_step.py # 仅测 intent_plan（拆检索短语）
 ├── mcp_bridge.py               # MCP 配置发现、history.jsonl 追加
 ├── model/
@@ -314,18 +321,17 @@ ai_news_skill/
 
 ---
 
-## Intent → 多关键词与 Google HK
+## Intent → 多关键词与 Playwright（站点爬虫）
 
 | 配置项（`app.py` / `config`） | 含义 |
 |------------------------------|------|
 | `llm_intent_analysis` | 为 True 且 LLM 可用时，调用 `llm_extract_intent_search_queries`，输出 JSON 数组或 `{"queries":[...]}`。 |
 | `gnews_per_keyword` | 为 True 时，对 `plan["keywords"]` **每个短语各调一次** `fetch_gnews_articles`；为 False 时沿用「单条 infer_gnews + 合并 query」旧逻辑。 |
-| `google_hk_search_enabled` | **默认 True**。`build_google_web_items_valid_only`：按 SERP 顺序尝试抓取正文，**仅保留** `is_valid_article_excerpt` 通过的条目，凑满 `items_per_category_max`（默认 5）条「网页检索」或候选耗尽；失败则试下一条 URL。 |
-| `items_per_category_max` | 默认 **5**：`cap_items_per_category` 对每个 **板块**（category）最多保留 5 条。 |
-| `limit` / `gnews_max` | 后端固定 **5**（Streamlit 不再提供条数滑块）。 |
+| `items_per_category_max` | 与 Streamlit「每板块最多条数」同步；`cap_items_per_category` 按 category 截断。 |
+| `limit` / `gnews_max` | 分别控制 RSS/站点每源条数与 GNews 上限。 |
 | **LLM 解读** | `enrich_items_with_llm` 要求每条 `core_cn` 约 **200–300 汉字**，基于 `content_excerpt` 压缩，英文译中文。 |
 
-**Playwright 浏览器下载（卡点与镜像）**
+**Playwright 浏览器下载（站点定制列表/详情爬虫；非搜索引擎）**
 
 - 默认从微软 CDN 拉取 Chromium（约 160MB+），国内常卡在 **30%～70%**，属于 **下载未完成或极慢**，不是 Python 死锁。
 - **可用镜像**（官方支持 [PLAYWRIGHT_DOWNLOAD_HOST](https://playwright.dev/python/docs/browsers#download-from-artifact-repository)）：  
@@ -336,8 +342,6 @@ ai_news_skill/
 - 仍慢时可设：`export PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT=120000`（毫秒）延长超时。
 
 **回退**：LLM 失败或无 Key 时，使用 `extract_intent_keywords`；若用户输入含中英文逗号，优先用 `_clause_core_phrases` 按分句得到短语（例如「…新闻，还想…进展」→ 两条独立检索）。
-
-**合规**：自动化访问搜索引擎可能违反服务条款；见 `ai_news_skill/crawlers/google_hk_playwright.py` 顶部注释。若需关闭，在调用 `run_with_graph` / `run_digest_pipeline` 的 `config` 中设 `google_hk_search_enabled: False`。
 
 **单步调试**：`python3 scripts/test_intent_step.py "你的句子"` 只跑 `intent_plan_stage` 并打印 `keywords`。
 

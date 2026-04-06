@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import pathlib
 import time
 from typing import Any, TypedDict
+
+from ai_news_skill.user_news_memory import attach_memory_to_config
 
 from langchain_core.tools import tool
 from langgraph.graph import END, StateGraph
@@ -68,6 +71,11 @@ def _bootstrap_node(state: DigestState) -> DigestState:
     if state.get("trace"):
         return state
     config = state.get("config", {})
+    try:
+        src_p = pathlib.Path(config.get("sources", "sources.json")).resolve()
+        attach_memory_to_config(config, src_p.parent)
+    except Exception:
+        pass
     ctx = init_run_context(config)
     state["started_obj"] = ctx["started"]
     state["started_iso"] = ctx["started"].isoformat()

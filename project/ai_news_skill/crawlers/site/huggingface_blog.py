@@ -10,7 +10,7 @@ from bs4 import BeautifulSoup
 
 from run_daily_digest import strip_html
 
-from .base import CrawledItem
+from .base import CrawledItem, playwright_chromium_launch_kwargs
 
 
 class HuggingFaceBlogCrawler:
@@ -267,7 +267,7 @@ def _fetch_html_playwright(url: str, *, timeout_ms: int) -> str | None:
         return None
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
+            browser = p.chromium.launch(**playwright_chromium_launch_kwargs())
             context = browser.new_context(
                 user_agent=(
                     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -303,7 +303,7 @@ def _fetch_html_playwright_scroll(
 
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
+            browser = p.chromium.launch(**playwright_chromium_launch_kwargs())
             context = browser.new_context(
                 user_agent=(
                     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "

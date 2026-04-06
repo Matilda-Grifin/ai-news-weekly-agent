@@ -8,11 +8,14 @@ import pathlib
 import re
 import ssl
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from collections import Counter, defaultdict
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import timedelta
 from email.utils import parsedate_to_datetime
 from typing import Any
@@ -22,6 +25,315 @@ DEFAULT_SOURCES_FILE = "sources.json"
 DEFAULT_OUTPUT_DIR = "daily_docs"
 USER_AGENT = "ai-digest-agent/0.1 (+local-script)"
 ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
+
+
+def _webshare_apply_backbone_port_override(proxy_url: str) -> str:
+    """
+    Webshare Backbone：官方文档允许在 p.webshare.io 上使用 80、1080、3128、9999–19999 等端口。
+    若本机 :80 被墙/超时，可在 .env 设 WEBSHARE_BACKBONE_PORT=1080（或 WEBSHARE_PROXY_PORT）。
+    """
+    port_raw = (os.getenv("WEBSHARE_BACKBONE_PORT") or os.getenv("WEBSHARE_PROXY_PORT") or "").strip()
+    if not port_raw.isdigit():
+        return proxy_url
+    p = urllib.parse.urlparse(proxy_url)
+    if not p.hostname or "webshare.io" not in p.hostname.lower():
+        return proxy_url
+    new_port = str(int(port_raw))
+    if p.username is not None:
+        uq = urllib.parse.quote(p.username, safe="")
+        pq = urllib.parse.quote(p.password or "", safe="")
+        netloc = f"{uq}:{pq}@{p.hostname}:{new_port}"
+    else:
+        netloc = f"{p.hostname}:{new_port}"
+    return urllib.parse.urlunparse(
+        (p.scheme or "http", netloc, p.path or "", p.params, p.query, p.fragment)
+    )
+
+
+def _urlopen_webshare_control_api(req: urllib.request.Request, *, timeout: int = 25):
+    """
+    调用 proxy.webshare.io 的 REST API 时不应走 OUTBOUND_HTTP_PROXY（避免自指环路与 Token 请求异常）。
+    见 https://apidocs.webshare.io/proxy-list/list
+    """
+    ctx = ssl.create_default_context()
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPHandler(),
+        urllib.request.HTTPSHandler(context=ctx),
+    )
+    return opener.open(req, timeout=timeout)
+
+
+def _webshare_api_token() -> str:
+    return (os.getenv("WEBSHARE_API_TOKEN") or os.getenv("WEBSHARE_API_KEY") or "").strip()
+
+
+def _webshare_list_api_enabled() -> bool:
+    if not _webshare_api_token():
+        return False
+    flag = (os.getenv("WEBSHARE_USE_PROXY_LIST_API") or "").strip().lower()
+    if flag in ("0", "false", "no", "off"):
+        return False
+    return True
+
+
+def _webshare_fetch_proxy_list_payload() -> dict[str, Any] | None:
+    """
+    拉取 Webshare proxy/list JSON（与 YouTube 子项目一致：优先 requests，params mode=backbone&page_size=10）。
+    """
+    token = _webshare_api_token()
+    if not token or not _webshare_list_api_enabled():
+        return None
+    list_url = (os.getenv("WEBSHARE_PROXY_LIST_URL") or "").strip()
+    try:
+        page_size = int((os.getenv("WEBSHARE_PROXY_LIST_PAGE_SIZE") or "10").strip() or "10")
+    except ValueError:
+        page_size = 10
+    try:
+        page = int((os.getenv("WEBSHARE_PROXY_LIST_PAGE") or "1").strip() or "1")
+    except ValueError:
+        page = 1
+    mode = (os.getenv("WEBSHARE_PROXY_LIST_MODE") or "backbone").strip().lower()
+    if mode not in ("direct", "backbone"):
+        mode = "backbone"
+    plan_id = (os.getenv("WEBSHARE_PLAN_ID") or "").strip()
+
+    if not list_url:
+        params: dict[str, Any] = {"page_size": page_size, "page": page, "mode": mode}
+        if plan_id:
+            params["plan_id"] = plan_id
+        try:
+            import requests
+
+            r = requests.get(
+                "https://proxy.webshare.io/api/v2/proxy/list/",
+                headers={"Authorization": f"Token {token}", "User-Agent": USER_AGENT},
+                params=params,
+                timeout=10,
+            )
+            if r.ok:
+                data = r.json()
+                return data if isinstance(data, dict) else None
+        except Exception:
+            pass
+        q = [f"page_size={page_size}", f"page={page}", f"mode={urllib.parse.quote(mode)}"]
+        if plan_id:
+            q.append(f"plan_id={urllib.parse.quote(plan_id)}")
+        list_url = "https://proxy.webshare.io/api/v2/proxy/list/?" + "&".join(q)
+
+    req = urllib.request.Request(
+        list_url,
+        headers={"Authorization": f"Token {token}", "User-Agent": USER_AGENT},
+    )
+    try:
+        with _urlopen_webshare_control_api(req, timeout=25) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="ignore"))
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _webshare_rows_to_candidate_urls(data: dict[str, Any]) -> list[str]:
+    """
+    与参考实现一致：addr = proxy_address or \"p.webshare.io\"；每条 http://user:pass@addr:port
+    """
+    out: list[str] = []
+    for item in data.get("results") or []:
+        if not isinstance(item, dict) or not item.get("valid", True):
+            continue
+        addr = item.get("proxy_address") or "p.webshare.io"
+        if isinstance(addr, str):
+            addr = addr.strip() or "p.webshare.io"
+        else:
+            addr = "p.webshare.io"
+        port = item.get("port")
+        username = (item.get("username") or "").strip()
+        password = (item.get("password") or "").strip()
+        if port is None or not username or not password:
+            continue
+        try:
+            port_i = int(port)
+        except (TypeError, ValueError):
+            continue
+        uq = urllib.parse.quote(username, safe="")
+        pq = urllib.parse.quote(password, safe="")
+        out.append(f"http://{uq}:{pq}@{addr}:{port_i}")
+    return out
+
+
+def _webshare_rotating_gateway_url() -> str:
+    """
+    无 API、无 WEBSHARE_PROXY_URL 时：用控制台 Proxy List 的用户名+密码走旋转网关（与另一项目 WEBSHARE_PROXY_USERNAME/PASSWORD 一致）。
+    """
+    u = (os.getenv("WEBSHARE_PROXY_USERNAME") or os.getenv("WEBSHARE_USERNAME") or "").strip()
+    p = (os.getenv("WEBSHARE_PROXY_PASSWORD") or os.getenv("WEBSHARE_PASSWORD") or "").strip()
+    if not u or not p:
+        return ""
+    port_raw = (os.getenv("WEBSHARE_BACKBONE_PORT") or os.getenv("WEBSHARE_PROXY_PORT") or "").strip()
+    port = int(port_raw) if port_raw.isdigit() else 80
+    uq = urllib.parse.quote(u, safe="")
+    pq = urllib.parse.quote(p, safe="")
+    return f"http://{uq}:{pq}@p.webshare.io:{port}/"
+
+
+def _webshare_only_proxy_urls_ordered() -> list[str]:
+    """
+    与 YouTube 子项目候选顺序对齐：手写 URL（若有）→ API 多条 → rotating 网关。
+    urllib 会依次尝试列表直至成功。
+    """
+    urls: list[str] = []
+    seen: set[str] = set()
+
+    def add(u: str) -> None:
+        u = u.strip().strip('"').strip("'")
+        if not u or u in seen:
+            return
+        seen.add(u)
+        urls.append(u)
+
+    manual = (os.getenv("WEBSHARE_PROXY_URL") or "").strip().strip('"').strip("'")
+    if manual:
+        add(manual)
+    data = _webshare_fetch_proxy_list_payload()
+    if data:
+        for u in _webshare_rows_to_candidate_urls(data):
+            add(u)
+    gw = _webshare_rotating_gateway_url()
+    if gw:
+        add(gw.rstrip("/"))
+    return urls
+
+
+def _webshare_only_proxy_url() -> str:
+    lst = _webshare_only_proxy_urls_ordered()
+    return lst[0] if lst else ""
+
+
+def _generic_outbound_proxy_url() -> str:
+    """通用环境代理（对所有出站场景生效，优先于 Webshare）。含 YOUTUBE_PROXY_* 以兼容另一项目 .env。"""
+    for key in (
+        "OUTBOUND_HTTP_PROXY",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "YOUTUBE_PROXY_HTTPS",
+        "YOUTUBE_PROXY_HTTP",
+    ):
+        v = (os.getenv(key) or "").strip().strip('"').strip("'")
+        if v:
+            return v
+    return ""
+
+
+def _outbound_webshare_scope_allowed(scope: str) -> bool:
+    """
+    Webshare 仅用于需要换出口 IP 的路径（默认：站点 urllib + Playwright），避免 RSS/GNews/公开 API 全走住宅代理。
+    OUTBOUND_WEBSHARE_SCOPES（或 WEBSHARE_SCOPES）：逗号分隔
+      digest — run_daily_digest 里 RSS、GNews、文章摘录等 fetch_text/fetch_json
+      public_feeds — integrations/public_api_feeds
+      site_crawler — TechCrunch / VentureBeat 等站点 urllib
+      playwright — Chromium 站点爬取
+    未设置时默认全场景使用 Webshare（只配 WEBSHARE_API_KEY 即可跑通整站抓取）。
+    若只想给浏览器/站点 urllib 用代理：OUTBOUND_WEBSHARE_SCOPES=site_crawler,playwright
+    """
+    raw = (os.getenv("OUTBOUND_WEBSHARE_SCOPES") or os.getenv("WEBSHARE_SCOPES") or "").strip().lower()
+    s = (scope or "digest").strip().lower()
+    if not raw:
+        return True
+    if raw in ("*", "all", "1", "true", "yes", "on"):
+        return True
+    allowed = {p.strip().lower() for p in raw.split(",") if p.strip()}
+    return s in allowed
+
+
+def outbound_http_proxy_url_for_scope(scope: str) -> str:
+    """
+    按场景解析出站代理：先通用 HTTPS_PROXY 等；否则仅在 scope 允许时使用 Webshare（含 API / 网关用户名密码）。
+    """
+    g = _generic_outbound_proxy_url()
+    if g:
+        return _webshare_apply_backbone_port_override(g)
+    if _outbound_webshare_scope_allowed(scope):
+        w = _webshare_only_proxy_url()
+        if w:
+            return _webshare_apply_backbone_port_override(w)
+    return ""
+
+
+def outbound_http_proxy_url() -> str:
+    """
+    兼容旧调用：等同 outbound_http_proxy_url_for_scope("digest")。
+    诊断「Webshare 是否用于浏览器爬取」请用 outbound_http_proxy_url_for_scope("playwright")。
+    """
+    return outbound_http_proxy_url_for_scope("digest")
+
+
+def urlopen_with_outbound_proxy(
+    req: urllib.request.Request,
+    *,
+    timeout: int,
+    context: ssl.SSLContext,
+    proxy_scope: str = "digest",
+):
+    """
+    urllib.request.urlopen 的代理版。
+    通用代理单条；Webshare 侧与参考项目一致：API 返回多条时依次尝试直至成功。
+    """
+    g = _generic_outbound_proxy_url()
+    if g:
+        proxy = _webshare_apply_backbone_port_override(g)
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({"http": proxy, "https": proxy}),
+            urllib.request.HTTPHandler(),
+            urllib.request.HTTPSHandler(context=context),
+        )
+        return opener.open(req, timeout=timeout)
+
+    if not _outbound_webshare_scope_allowed(proxy_scope):
+        return urllib.request.urlopen(req, timeout=timeout, context=context)
+
+    candidates = [
+        _webshare_apply_backbone_port_override(u) for u in _webshare_only_proxy_urls_ordered()
+    ]
+    if not candidates:
+        return urllib.request.urlopen(req, timeout=timeout, context=context)
+
+    last_err: BaseException | None = None
+    for proxy in candidates:
+        try:
+            opener = urllib.request.build_opener(
+                urllib.request.ProxyHandler({"http": proxy, "https": proxy}),
+                urllib.request.HTTPHandler(),
+                urllib.request.HTTPSHandler(context=context),
+            )
+            return opener.open(req, timeout=timeout)
+        except (urllib.error.URLError, ssl.SSLError, TimeoutError, OSError) as exc:
+            last_err = exc
+            continue
+    if last_err is not None:
+        raise last_err
+    return urllib.request.urlopen(req, timeout=timeout, context=context)
+
+
+def playwright_proxy_for_browser() -> dict[str, str] | None:
+    """
+    供 Playwright chromium.launch(proxy=...) 使用；Webshare 仅当 OUTBOUND_WEBSHARE_SCOPES 含 playwright（默认含）时生效。
+    """
+    raw = outbound_http_proxy_url_for_scope("playwright")
+    if not raw:
+        return None
+    parsed = urllib.parse.urlparse(raw)
+    if not parsed.hostname:
+        return None
+    scheme = (parsed.scheme or "http").lower()
+    port = parsed.port
+    if port is None:
+        port = 443 if scheme == "https" else 80
+    server = f"{scheme}://{parsed.hostname}:{port}"
+    inner: dict[str, str] = {"server": server}
+    if parsed.username is not None:
+        inner["username"] = urllib.parse.unquote(parsed.username)
+    if parsed.password is not None:
+        inner["password"] = urllib.parse.unquote(parsed.password)
+    return inner
 OPENCLAW_LEADERBOARD_URL = "https://topclawhubskills.com/"
 GNEWS_SEARCH_URL = "https://gnews.io/api/v4/search"
 DEFAULT_ALLOWED_LLM_HOSTS = {
@@ -61,11 +373,19 @@ def load_dotenv(path: pathlib.Path) -> None:
             os.environ[key] = value
 
 
-def fetch_text(url: str, timeout: int = 15, allow_insecure_fallback: bool = False) -> str:
+def fetch_text(
+    url: str,
+    timeout: int = 15,
+    allow_insecure_fallback: bool = False,
+    *,
+    proxy_scope: str = "digest",
+) -> str:
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
 
     def _read_with_context(context: ssl.SSLContext) -> str:
-        with urllib.request.urlopen(req, timeout=timeout, context=context) as resp:
+        with urlopen_with_outbound_proxy(
+            req, timeout=timeout, context=context, proxy_scope=proxy_scope
+        ) as resp:
             return resp.read().decode("utf-8", errors="ignore")
 
     try:
@@ -82,12 +402,20 @@ def fetch_text(url: str, timeout: int = 15, allow_insecure_fallback: bool = Fals
         raise
 
 
-def fetch_json_url(url: str, timeout: int = 20, allow_insecure_fallback: bool = False) -> dict[str, Any]:
+def fetch_json_url(
+    url: str,
+    timeout: int = 20,
+    allow_insecure_fallback: bool = False,
+    *,
+    proxy_scope: str = "digest",
+) -> dict[str, Any]:
     """GET JSON from HTTPS URL (e.g. GNews API)."""
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
 
     def _read(context: ssl.SSLContext) -> dict[str, Any]:
-        with urllib.request.urlopen(req, timeout=timeout, context=context) as resp:
+        with urlopen_with_outbound_proxy(
+            req, timeout=timeout, context=context, proxy_scope=proxy_scope
+        ) as resp:
             body = resp.read().decode("utf-8", errors="ignore")
         return json.loads(body)
 
@@ -356,66 +684,126 @@ def load_sources(path: pathlib.Path) -> list[dict]:
     return data
 
 
-def collect_news(
-    sources: list[dict], per_source: int, allow_insecure_fallback: bool, window_hours: int
+def _parse_published_dt_collect(raw: str, now_dt: dt.datetime) -> dt.datetime | None:
+    text = (raw or "").strip()
+    if not text:
+        return None
+    try:
+        d = parsedate_to_datetime(text)
+        if d is None:
+            return None
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=now_dt.tzinfo)
+        return d.astimezone(now_dt.tzinfo)
+    except Exception:
+        pass
+    try:
+        norm = text.replace("Z", "+00:00")
+        d2 = dt.datetime.fromisoformat(norm)
+        if d2.tzinfo is None:
+            d2 = d2.replace(tzinfo=now_dt.tzinfo)
+        return d2.astimezone(now_dt.tzinfo)
+    except Exception:
+        return None
+
+
+def _collect_one_rss_source(
+    src: dict,
+    *,
+    per_source: int,
+    allow_insecure_fallback: bool,
+    now_dt: dt.datetime,
+    cutoff: dt.datetime,
 ) -> tuple[list[dict], list[str]]:
-    all_items = []
-    errors = []
+    out: list[dict] = []
+    errs: list[str] = []
+    name = src.get("name", "unknown")
+    rss = src.get("rss_url", "").strip()
+    category = src.get("category", "其他")
+    if not rss:
+        return out, [f"{name}: rss_url empty"]
+    try:
+        try:
+            rss_to = int(os.environ.get("RSS_HTTP_TIMEOUT", "15"))
+        except ValueError:
+            rss_to = 15
+        rss_to = max(5, min(90, rss_to))
+        xml_text = fetch_text(
+            rss,
+            timeout=rss_to,
+            allow_insecure_fallback=allow_insecure_fallback,
+        )
+        entries = parse_rss(xml_text)[:per_source]
+        for e in entries:
+            pub_dt = _parse_published_dt_collect(e.get("published", ""), now_dt)
+            if pub_dt is None or pub_dt < cutoff or pub_dt > now_dt + timedelta(minutes=10):
+                continue
+            out.append(
+                {
+                    "source": name,
+                    "category": category,
+                    "title": e["title"],
+                    "link": e["link"],
+                    "summary": e.get("summary", ""),
+                    "published": e.get("published", ""),
+                }
+            )
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ET.ParseError) as ex:
+        errs.append(f"{name}: {type(ex).__name__} {ex}")
+    except Exception as ex:  # noqa: BLE001
+        errs.append(f"{name}: {type(ex).__name__} {ex}")
+    return out, errs
+
+
+def collect_news(
+    sources: list[dict],
+    per_source: int,
+    allow_insecure_fallback: bool,
+    window_hours: int,
+    *,
+    max_parallel: int | None = None,
+    rss_source_hook: Callable[[str, float, int, list[str]], None] | None = None,
+) -> tuple[list[dict], list[str]]:
+    all_items: list[dict] = []
+    errors: list[str] = []
     now_dt = now_local()
     cutoff = now_dt - timedelta(hours=max(1, window_hours))
+    if not sources:
+        return dedupe_items(all_items), errors
 
-    def parse_published_dt(raw: str) -> dt.datetime | None:
-        text = (raw or "").strip()
-        if not text:
-            return None
-        try:
-            d = parsedate_to_datetime(text)
-            if d is None:
-                return None
-            if d.tzinfo is None:
-                d = d.replace(tzinfo=now_dt.tzinfo)
-            return d.astimezone(now_dt.tzinfo)
-        except Exception:
-            pass
-        try:
-            # Handles common Atom format like 2026-03-23T08:30:00Z
-            norm = text.replace("Z", "+00:00")
-            d2 = dt.datetime.fromisoformat(norm)
-            if d2.tzinfo is None:
-                d2 = d2.replace(tzinfo=now_dt.tzinfo)
-            return d2.astimezone(now_dt.tzinfo)
-        except Exception:
-            return None
+    try:
+        env_w = int(os.environ.get("COLLECT_NEWS_MAX_WORKERS", "8"))
+    except ValueError:
+        env_w = 8
+    workers = max_parallel if max_parallel is not None else env_w
+    workers = max(1, min(workers, len(sources)))
 
-    for src in sources:
-        name = src.get("name", "unknown")
-        rss = src.get("rss_url", "").strip()
-        category = src.get("category", "其他")
-        if not rss:
-            errors.append(f"{name}: rss_url empty")
-            continue
-        try:
-            xml_text = fetch_text(rss, allow_insecure_fallback=allow_insecure_fallback)
-            entries = parse_rss(xml_text)[:per_source]
-            for e in entries:
-                pub_dt = parse_published_dt(e.get("published", ""))
-                # Keep only news published in the recent window.
-                if pub_dt is None or pub_dt < cutoff or pub_dt > now_dt + timedelta(minutes=10):
-                    continue
-                all_items.append(
-                    {
-                        "source": name,
-                        "category": category,
-                        "title": e["title"],
-                        "link": e["link"],
-                        "summary": e.get("summary", ""),
-                        "published": e.get("published", ""),
-                    }
-                )
-        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ET.ParseError) as ex:
-            errors.append(f"{name}: {type(ex).__name__} {ex}")
-        except Exception as ex:  # noqa: BLE001
-            errors.append(f"{name}: {type(ex).__name__} {ex}")
+    def _one(src: dict) -> tuple[list[dict], list[str]]:
+        t0 = time.perf_counter()
+        chunk, errs = _collect_one_rss_source(
+            src,
+            per_source=per_source,
+            allow_insecure_fallback=allow_insecure_fallback,
+            now_dt=now_dt,
+            cutoff=cutoff,
+        )
+        if rss_source_hook is not None:
+            elapsed = time.perf_counter() - t0
+            rss_source_hook(str(src.get("name", "")), elapsed, len(chunk), errs)
+        return chunk, errs
+
+    if workers <= 1:
+        for src in sources:
+            chunk, errs = _one(src)
+            all_items.extend(chunk)
+            errors.extend(errs)
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futs = [pool.submit(_one, src) for src in sources]
+            for fut in as_completed(futs):
+                chunk, errs = fut.result()
+                all_items.extend(chunk)
+                errors.extend(errs)
     return dedupe_items(all_items), errors
 
 
@@ -573,9 +961,13 @@ def infer_gnews_search_query(
 
 
 def attach_content_excerpts_to_items(
-    items: list[dict], allow_insecure_fallback: bool
+    items: list[dict],
+    allow_insecure_fallback: bool,
+    *,
+    max_parallel: int | None = None,
 ) -> None:
     """Fill content_excerpt by fetching article HTML when RSS summary is thin."""
+    to_fetch: list[dict] = []
     for it in items:
         ce = (it.get("content_excerpt") or "").strip()
         if len(ce) >= 120:
@@ -583,9 +975,36 @@ def attach_content_excerpts_to_items(
         link = (it.get("link") or "").strip()
         if not link:
             continue
-        excerpt = fetch_article_excerpt(link, allow_insecure_fallback=allow_insecure_fallback)
-        if excerpt:
-            it["content_excerpt"] = excerpt
+        to_fetch.append(it)
+
+    if not to_fetch:
+        return
+
+    try:
+        env_w = int(os.environ.get("EXCERPT_FETCH_MAX_WORKERS", "8"))
+    except ValueError:
+        env_w = 8
+    workers = max_parallel if max_parallel is not None else env_w
+    workers = max(1, min(workers, len(to_fetch)))
+
+    def _fetch_one(it: dict) -> tuple[dict, str]:
+        link = (it.get("link") or "").strip()
+        ex = fetch_article_excerpt(link, allow_insecure_fallback=allow_insecure_fallback)
+        return it, ex
+
+    if workers <= 1:
+        for it in to_fetch:
+            _, excerpt = _fetch_one(it)
+            if excerpt:
+                it["content_excerpt"] = excerpt
+        return
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futs = [pool.submit(_fetch_one, it) for it in to_fetch]
+        for fut in as_completed(futs):
+            it, excerpt = fut.result()
+            if excerpt:
+                it["content_excerpt"] = excerpt
 
 
 def is_valid_article_excerpt(text: str) -> bool:
@@ -615,55 +1034,6 @@ def cap_items_per_category(items: list[dict], max_per: int = 5) -> list[dict]:
         rows.sort(key=lambda x: parse_published_dt_for_sort(x.get("published", "")), reverse=True)
         out.extend(rows[:max_per])
     return dedupe_items(out)
-
-
-def build_google_web_items_valid_only(
-    plan_kw: list[str],
-    *,
-    max_queries: int,
-    serp_pool: int,
-    target_count: int,
-    allow_insecure_fallback: bool,
-    headless: bool,
-    user_data_dir: str = "",
-) -> tuple[list[dict], list[str]]:
-    """
-    按关键词拉 SERP 候选池，按顺序尝试抓取正文；仅采用 is_valid_article_excerpt 通过的条目，
-    直到凑满 target_count 条「网页检索」或候选耗尽。
-    """
-    from ai_news_skill.crawlers.google_hk_playwright import (
-        fetch_google_hk_serp_items,
-        fetch_page_main_text,
-    )
-
-    errors: list[str] = []
-    raw_pool: list[dict] = []
-    for kw in plan_kw[: max(1, max_queries)]:
-        chunk, err = fetch_google_hk_serp_items(
-            kw,
-            max_results=max(5, serp_pool),
-            headless=headless,
-            user_data_dir=user_data_dir,
-        )
-        if err:
-            errors.append(err)
-        raw_pool.extend(chunk)
-    raw_pool = dedupe_items(raw_pool)
-    out: list[dict] = []
-    for it in raw_pool:
-        if len(out) >= target_count:
-            break
-        link = (it.get("link") or "").strip()
-        if not link:
-            continue
-        body = fetch_article_excerpt(link, allow_insecure_fallback=allow_insecure_fallback)
-        if not is_valid_article_excerpt(body):
-            body = fetch_page_main_text(link, headless=headless)
-        if not is_valid_article_excerpt(body):
-            continue
-        it["content_excerpt"] = body[:12000]
-        out.append(it)
-    return out, errors
 
 
 def fetch_gnews_articles(
@@ -875,10 +1245,12 @@ def category_order_key(name: str) -> tuple[int, str]:
         "官方发布": 0,
         "国内厂商动态": 1,
         "开源与工具": 2,
-        "论文研究": 3,
-        "行业资讯": 4,
+        "行业资讯": 3,
+        "垂直与趣味": 4,
         "网页检索": 5,
         "社区讨论": 6,
+        # Paper feeds are often less time-sensitive in daily digest; keep at the bottom.
+        "论文研究": 98,
         "其他": 99,
     }
     return (preferred.get(name, 90), name)
@@ -1396,29 +1768,6 @@ def render_markdown(
 
     lines.extend(["## 正文", ""])
 
-    if openclaw_top:
-        lines.extend(["### OpenClaw 技能热榜（按 Star）", ""])
-        lines.append(
-            f"以下为最近一周区间内可获取的最新榜单快照（更新时间：{openclaw_asof or '未知'}）。"
-        )
-        lines.append("")
-        for i, row in enumerate(openclaw_top, 1):
-            purpose = build_openclaw_purpose_text(row["skill_name"], row.get("summary", ""))
-            lines.extend(
-                [
-                    f"#### 热榜第{i}名：{row['skill_name']}",
-                    f"该技能由 {row['author']} 发布，当前 Stars 约为 {row['stars_text']}。"
-                    f"主要用途：{purpose}",
-                    "",
-                ]
-            )
-        if openclaw_focus:
-            lines.append(
-                f"你关注的技能「{openclaw_focus['skill_name']}」当前排名第 {openclaw_focus['rank']}，"
-                f"发布者为 {openclaw_focus['author']}，Stars 约 {openclaw_focus['stars_text']}。"
-            )
-            lines.append("")
-
     if not items:
         lines.extend(["- 今日无可用条目（可检查网络或信源地址）", ""])
     else:
@@ -1462,7 +1811,37 @@ def render_markdown(
                 )
                 idx += 1
 
+    # OpenClaw 置于资讯条目之后：GitHub Release/仓库动态等信源优先阅读，热榜为社区热度辅助。
     if openclaw_top:
+        lines.extend(
+            [
+                "### OpenClaw 技能热榜（社区热度 · 辅助参考）",
+                "",
+                "以下榜单按 Star 排序，用于对照工具生态关注度；**技术事实与版本动态请以正文中 GitHub/官方条目为准。**",
+                "",
+            ]
+        )
+        lines.append(
+            f"快照更新时间：{openclaw_asof or '未知'}（最近一周区间内可获取的最新榜单）。"
+        )
+        lines.append("")
+        for i, row in enumerate(openclaw_top, 1):
+            purpose = build_openclaw_purpose_text(row["skill_name"], row.get("summary", ""))
+            lines.extend(
+                [
+                    f"#### 热榜第{i}名：{row['skill_name']}",
+                    f"该技能由 {row['author']} 发布，当前 Stars 约为 {row['stars_text']}。"
+                    f"主要用途：{purpose}",
+                    "",
+                ]
+            )
+        if openclaw_focus:
+            lines.append(
+                f"你关注的技能「{openclaw_focus['skill_name']}」当前排名第 {openclaw_focus['rank']}，"
+                f"发布者为 {openclaw_focus['author']}，Stars 约 {openclaw_focus['stars_text']}。"
+            )
+            lines.append("")
+
         lines.extend(["## OpenClaw 链接", ""])
         lines.append(f"- 榜单来源页：{OPENCLAW_LEADERBOARD_URL}")
         for i, row in enumerate(openclaw_top, 1):
@@ -1730,6 +2109,22 @@ def main() -> int:
             items = dedupe_items(items + g_items)
     elif args.enable_gnews and not (args.gnews_api_key or "").strip():
         errors.append("GNews: --enable-gnews set but no --gnews-api-key or GNEWS_API_KEY")
+
+    if (os.getenv("PUBLIC_API_FEEDS", "") or "").strip():
+        try:
+            from ai_news_skill.integrations.public_api_feeds import collect_public_api_feed_items
+
+            api_extra, api_errs = collect_public_api_feed_items(
+                window_hours=args.window_hours,
+                allow_insecure_fallback=args.allow_insecure_ssl,
+                config={},
+                max_per_feed=None,
+            )
+            errors.extend(api_errs)
+            if api_extra:
+                items = dedupe_items(api_extra + items)
+        except Exception as ex:  # noqa: BLE001
+            errors.append(f"public_api_feeds: {type(ex).__name__} {ex}")
 
     # If official releases are too few in base window, fetch official sources with a wider window.
     official_count = len([x for x in items if x.get("category") == "官方发布"])

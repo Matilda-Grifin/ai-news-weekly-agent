@@ -23,7 +23,6 @@ MOVE_ALLOWLIST = [
     "agent_runtime.py",
     "langgraph_agent.py",
     "run_daily_digest.py",
-    "google_hk_playwright.py",
     "mcp_bridge.py",
     "agent_tool_runner.py",
     "digest_tools.py",

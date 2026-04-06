@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlparse
@@ -10,7 +11,7 @@ from bs4 import BeautifulSoup
 
 from run_daily_digest import strip_html
 
-from .base import CrawledItem
+from .base import CrawledItem, playwright_chromium_launch_kwargs
 
 
 class OpenAINewsCrawler:
@@ -35,24 +36,36 @@ class OpenAINewsCrawler:
         window_hours: int,
         allow_insecure_fallback: bool,  # kept for protocol compatibility (unused here)
     ) -> list[CrawledItem]:
-        # 1) Scroll list page to collect enough links.
-        links = _collect_openai_news_links(
+        # 1) Scroll list page to collect enough links (+ anchor text for CF-blocked detail pages).
+        link_rows = _collect_openai_news_links(
             self.LIST_URL,
             target=max(10, per_source * 4),
-            timeout_ms=30000,
+            timeout_ms=45000,
+            allow_insecure_fallback=allow_insecure_fallback,
         )
 
         now_dt = datetime.now(timezone.utc).astimezone()
         cutoff = now_dt - timedelta(hours=max(1, window_hours))
 
         out: list[CrawledItem] = []
-        for href in links:
+        for href, list_title in link_rows:
             if len(out) >= max(1, per_source):
                 break
             try:
-                item = _fetch_detail(href, timeout_ms=30000)
-                if not item:
-                    continue
+                lt = (list_title or "").strip()
+                # List page usually has the headline; detail URLs often hit Cloudflare in headless — skip browser when we already have a title.
+                if lt:
+                    item = {"title": lt[:300], "published": "", "summary": "", "content_excerpt": ""}
+                else:
+                    item = _fetch_detail(href, timeout_ms=12000)
+                    if not item:
+                        slug = href.rstrip("/").split("/")[-1].replace("-", " ").strip()
+                        item = {
+                            "title": (slug[:300] if slug else href)[:300],
+                            "published": "",
+                            "summary": "",
+                            "content_excerpt": "",
+                        }
                 pub = _parse_dt(item.get("published", ""))
                 if pub and (pub < cutoff or pub > now_dt + timedelta(minutes=10)):
                     continue
@@ -72,7 +85,39 @@ class OpenAINewsCrawler:
         return out
 
 
-def _collect_openai_news_links(url: str, *, target: int, timeout_ms: int) -> list[str]:
+def _ingest_openai_list_from_soup(soup: BeautifulSoup, by_url: dict[str, str]) -> None:
+    def _push_href(raw: str, list_title: str = "") -> None:
+        href = (raw or "").strip()
+        if not href:
+            return
+        if href.startswith("/"):
+            full = "https://openai.com" + href
+        else:
+            full = href
+        full = _normalize_url(full)
+        if not _is_openai_news_index_post(full):
+            return
+        t = (list_title or "").strip()
+        if full not in by_url or len(t) > len(by_url[full]):
+            by_url[full] = t
+
+    for a in soup.find_all("a", href=True):
+        href = str(a.get("href") or "").strip()
+        if "/index/" not in href and "openai.com/index/" not in href.lower():
+            continue
+        title_guess = strip_html(a.get_text(" ", strip=True))[:400]
+        _push_href(href, title_guess)
+
+    if len(by_url) < 12:
+        for a in soup.select("a[href^='https://openai.com/'], a[href^='https://www.openai.com/']"):
+            href = _normalize_url((a.get("href") or "").strip())
+            if _is_openai_news_index_post(href):
+                _push_href(href, "")
+
+
+def _collect_openai_news_links(
+    url: str, *, target: int, timeout_ms: int, allow_insecure_fallback: bool = True
+) -> list[tuple[str, str]]:
     html = _fetch_html_playwright_scroll(
         url,
         timeout_ms=timeout_ms,
@@ -80,39 +125,63 @@ def _collect_openai_news_links(url: str, *, target: int, timeout_ms: int) -> lis
         scroll_pause_ms=650,
         click_load_more=True,
     )
-    soup = BeautifulSoup(html or "", "html.parser")
+    by_url: dict[str, str] = {}
+    _ingest_openai_list_from_soup(BeautifulSoup(html or "", "html.parser"), by_url)
 
-    links: list[str] = []
+    if len(by_url) < 1:
+        try:
+            from run_daily_digest import fetch_text
 
-    # Primary: OpenAI news items are usually /index/<slug>
-    for a in soup.select("a[href^='/index/'], a[href^='https://openai.com/index/']"):
-        href = (a.get("href") or "").strip()
-        if not href:
-            continue
-        full = href
-        if href.startswith("/"):
-            full = "https://openai.com" + href
-        full = _normalize_url(full)
-        if _is_openai_article_url(full) and full not in links:
-            links.append(full)
+            raw = fetch_text(
+                url,
+                timeout=min(20, max(10, timeout_ms // 2000)),
+                allow_insecure_fallback=allow_insecure_fallback,
+            )
+            _ingest_openai_list_from_soup(BeautifulSoup(raw or "", "html.parser"), by_url)
+        except Exception:
+            pass
 
-    # Fallback: any openai.com link that looks like an article.
-    if len(links) < max(6, min(target, 20)):
-        for a in soup.select("a[href^='https://openai.com/']"):
-            href = (a.get("href") or "").strip()
-            href = _normalize_url(href)
-            if _is_openai_article_url(href) and href not in links:
-                links.append(href)
+    if len(by_url) < 1:
+        try:
+            from run_daily_digest import fetch_text
 
-    return links[: max(1, target)]
+            raw = fetch_text(
+                "https://openai.com/news/rss.xml",
+                timeout=22,
+                allow_insecure_fallback=allow_insecure_fallback,
+            )
+            root = ET.fromstring(raw)
+            for item in root.findall(".//item"):
+                title = (item.findtext("title") or "").strip()
+                link = (item.findtext("link") or "").strip()
+                link = _normalize_url(link)
+                if title and _is_openai_news_index_post(link):
+                    by_url[link] = title
+        except Exception:
+            pass
+
+    pairs = list(by_url.items())
+    return pairs[: max(1, target)]
+
+
+def _is_openai_news_index_post(url: str) -> bool:
+    """News listing uses /index/<slug>; excludes /research/index hubs mistaken for posts."""
+    href = _normalize_url(url or "")
+    if not href.startswith("https://openai.com/index/"):
+        return False
+    parsed = urlparse(href)
+    if parsed.scheme != "https" or parsed.netloc != "openai.com":
+        return False
+    segs = [s for s in (parsed.path or "").split("/") if s]
+    return len(segs) >= 2 and segs[0] == "index" and bool(segs[1])
 
 
 def _is_openai_article_url(url: str) -> bool:
-    href = (url or "").strip()
+    href = _normalize_url(url or "")
     if not href.startswith("https://openai.com/"):
         return False
     parsed = urlparse(href)
-    if parsed.scheme != "https" or parsed.netloc not in {"openai.com", "www.openai.com"}:
+    if parsed.scheme != "https" or parsed.netloc != "openai.com":
         return False
     path = (parsed.path or "").strip("/")
     if not path:
@@ -135,14 +204,30 @@ def _normalize_url(url: str) -> str:
         return ""
     # Drop fragment and trailing slash for stable dedupe keys.
     u = u.split("#", 1)[0].strip()
+    if u.startswith("//"):
+        u = "https:" + u
+    # Playwright / site may emit www; _is_openai_article_url used to reject www-only prefixes.
+    u = u.replace("https://www.openai.com", "https://openai.com")
     if u.startswith("https://openai.com/") and u != "https://openai.com/":
         u = u.rstrip("/")
     return u
 
 
+def _html_looks_like_cloudflare(html: str) -> bool:
+    h = (html or "").lower()
+    return (
+        "challenges.cloudflare.com" in h
+        or "cf-challenge" in h
+        or "cf-chl-" in h
+        or ("just a moment" in h and "turnstile" in h)
+    )
+
+
 def _fetch_detail(url: str, *, timeout_ms: int) -> dict[str, Any] | None:
     url = _normalize_url(url)
     html = _fetch_html_playwright(url, timeout_ms=timeout_ms) or ""
+    if _html_looks_like_cloudflare(html):
+        return None
     if len(html.strip()) < 200:
         return None
     soup = BeautifulSoup(html, "html.parser")
@@ -266,7 +351,7 @@ def _fetch_html_playwright(url: str, *, timeout_ms: int) -> str | None:
 
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
+            browser = p.chromium.launch(**playwright_chromium_launch_kwargs())
             context = browser.new_context(
                 user_agent=(
                     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -278,8 +363,12 @@ def _fetch_html_playwright(url: str, *, timeout_ms: int) -> str | None:
             page = context.new_page()
             page.set_default_timeout(timeout_ms)
             page.goto(url, wait_until="domcontentloaded")
-            page.wait_for_timeout(800)
-            html = page.content()
+            try:
+                page.wait_for_load_state("load", timeout=min(20000, timeout_ms))
+            except Exception:
+                pass
+            page.wait_for_timeout(2000)
+            html = page.content() or ""
             context.close()
             browser.close()
             return html
@@ -306,7 +395,7 @@ def _fetch_html_playwright_scroll(
 
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
+            browser = p.chromium.launch(**playwright_chromium_launch_kwargs())
             context = browser.new_context(
                 user_agent=(
                     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -319,24 +408,18 @@ def _fetch_html_playwright_scroll(
             page.set_default_timeout(timeout_ms)
             # "networkidle" is unreliable on modern sites (long-polling, analytics).
             page.goto(url, wait_until="domcontentloaded")
-            page.wait_for_timeout(900)
+            try:
+                page.wait_for_load_state("load", timeout=min(30000, timeout_ms))
+            except Exception:
+                pass
+            page.wait_for_timeout(3000)
 
-            prev_height = 0
-            stable_rounds = 0
-
+            # Always run the full scroll budget: openai.com/news often hydrates late; early "stable height" exits were ~6–12s with empty /index/ links.
             for _ in range(max_scrolls):
                 if click_load_more:
                     _try_click_load_more(page)
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 page.wait_for_timeout(scroll_pause_ms)
-                height = int(page.evaluate("document.body.scrollHeight") or 0)
-                if height <= prev_height + 10:
-                    stable_rounds += 1
-                else:
-                    stable_rounds = 0
-                prev_height = max(prev_height, height)
-                if stable_rounds >= 3:
-                    break
 
             html = page.content()
             context.close()
