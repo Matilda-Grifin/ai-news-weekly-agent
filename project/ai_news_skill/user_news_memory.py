@@ -97,6 +97,70 @@ def memory_enabled() -> bool:
     )
 
 
+_GENERIC_BROWSE_PHRASES = (
+    "随便看看",
+    "随便看下",
+    "随便查下",
+    "随便查查",
+    "随便刷刷",
+    "看看最近",
+    "看看本周",
+    "看看新闻",
+    "看看资讯",
+    "来点新闻",
+    "来点资讯",
+    "发我新闻",
+    "发我资讯",
+    "新闻汇总",
+    "资讯汇总",
+    "今日新闻",
+    "本周新闻",
+    "这周新闻",
+)
+
+_GENERIC_TIME_HINTS = ("最近", "本周", "这周", "今日", "今天", "近7天", "近一周", "近期")
+_GENERIC_NEWS_HINTS = ("新闻", "资讯", "动态", "消息", "周报")
+
+_EXPLICIT_ACTION_HINTS = (
+    "查",
+    "搜索",
+    "检索",
+    "搜一下",
+    "查找",
+    "找一下",
+    "了解下",
+    "了解一下",
+    "给我找",
+    "帮我找",
+    "find",
+    "search",
+    "lookup",
+)
+
+_EXPLICIT_TOPIC_HINTS = (
+    "harness",
+    "engineering",
+    "arxiv",
+    "openai",
+    "anthropic",
+    "huggingface",
+    "llm",
+    "api",
+    "sdk",
+    "github",
+    "多模态",
+    "视频模型",
+    "推理",
+    "论文",
+    "paper",
+)
+
+
+def _contains_any(text: str, kws: tuple[str, ...]) -> bool:
+    t = text.lower()
+    return any(k.lower() in t for k in kws)
+
+
 def classify_query_mode(intent_text: str) -> str:
     """
     区分本轮检索模式（决定 User 记忆如何参与）：
@@ -107,28 +171,21 @@ def classify_query_mode(intent_text: str) -> str:
     t = (intent_text or "").strip()
     if not t:
         return "generic"
-    # 显式检索 / 指向具体主题
-    if re.search(
-        r"(查|搜索|检索|搜一下|查找|找一下|了解下|了解一下|给我找|帮我找|"
-        r"find\b|search\b|lookup\b)",
-        t,
-        re.I,
-    ):
+    # 先处理泛化短句：把「随便查下/看下」视为泛化浏览而非显式检索。
+    if _contains_any(t, _GENERIC_BROWSE_PHRASES):
+        return "generic"
+    # 显式检索 / 指向具体主题（动作词 + 主题词联合命中时优先 explicit）。
+    if _contains_any(t, _EXPLICIT_ACTION_HINTS) and _contains_any(t, _EXPLICIT_TOPIC_HINTS):
         return "explicit"
-    if re.search(
-        r"(harness|engineering|arxiv|openai|anthropic|github\.com|"
-        r"论文|paper|api\b|sdk\b|huggingface|llm\b|多模态)",
-        t,
-        re.I,
-    ):
+    if re.search(r"(github\.com|/|api\b|sdk\b|arxiv|paper|论文)", t, re.I) and _contains_any(t, _EXPLICIT_ACTION_HINTS):
         return "explicit"
-    # 泛化浏览：最近/本周 + 新闻资讯，或极短的「随便看看」类
+    # 泛化浏览：最近/本周 + 新闻资讯，或极短「随便看看」类
     if re.match(
         r"^[\s]*("
         r"(我)?想?(要)?看看(.{0,8})?(最近|本周|今日)?(的)?(新闻|资讯|动态|消息)|"
         r"看看(.{0,6})?(最近|本周)?(的)?(新闻|资讯)|"
         r"最近(.{0,8})?(有)?什么(.{0,6})?(新闻|资讯|消息|动态)|"
-        r"随便看看|"
+        r"随便看看|随便看下|随便查下|随便查查|"
         r"(给|来|发)(我)?(.{0,6})?(点|一些)?(新闻|资讯)|"
         r"(今日|本周|这周)(的)?(新闻|资讯)(汇总)?|"
         r"来(点|一份)?(新闻|资讯|周报)?"
@@ -141,7 +198,105 @@ def classify_query_mode(intent_text: str) -> str:
         r"(模型|论文|开源|api|github|harness|视频|生成|推理)", t, re.I
     ):
         return "generic"
+    if _contains_any(t, _GENERIC_TIME_HINTS) and _contains_any(t, _GENERIC_NEWS_HINTS):
+        return "generic"
+    if _contains_any(t, _EXPLICIT_ACTION_HINTS) and _contains_any(t, _EXPLICIT_TOPIC_HINTS):
+        return "explicit"
     return "explicit"
+
+
+def _llm_classify_query_mode(intent_text: str, config: dict[str, Any]) -> str | None:
+    """Use LLM to classify query mode. Returns 'generic'/'explicit' or None."""
+    if not (intent_text or "").strip():
+        return "generic"
+    try:
+        from run_daily_digest import call_chat_completion, resolve_llm_runtime
+    except Exception:
+        return None
+
+    class _NS:
+        pass
+
+    ns = _NS()
+    ns.llm_provider = str(config.get("llm_provider", "auto"))
+    ns.llm_base_url = str(config.get("llm_base_url", ""))
+    ns.allow_custom_llm_endpoint = bool(config.get("allow_custom_llm_endpoint", False))
+    ns.ark_api_key = str(config.get("ark_api_key", "")).strip()
+    ns.ark_endpoint_id = str(config.get("ark_endpoint_id", "")).strip()
+    ns.ark_model = str(config.get("ark_model", "")).strip()
+    try:
+        _provider, base_url, api_key = resolve_llm_runtime(ns)
+    except Exception:
+        return None
+    if not (api_key or "").strip():
+        return None
+
+    model = (
+        str(config.get("ark_endpoint_id", "")).strip()
+        or str(config.get("ark_model", "")).strip()
+        or os.getenv("OPENAI_MODEL", "").strip()
+        or "Doubao-Seed-1.6-lite"
+    )
+    sys_prompt = (
+        "你是一个意图分类器。只做二分类并返回 JSON。\n"
+        "分类定义：\n"
+        "1) generic：泛化浏览，用户想“随便看看最近新闻/资讯/动态”，不限定具体主题词。\n"
+        "2) explicit：显式主题检索，用户明确指定了主题/对象/术语并希望按该主题查找。\n"
+        "判定规则：\n"
+        "- “随便查下 / 随便看下 / 看看最近新闻”属于 generic。\n"
+        "- “查下 harness engineering / 搜 openai api 更新”属于 explicit。\n"
+        "输出必须是 JSON：{\"mode\":\"generic|explicit\",\"confidence\":0-1,\"reason\":\"简短中文\"}"
+    )
+    user_prompt = f"用户输入：{intent_text}"
+    try:
+        raw = call_chat_completion(
+            api_key=api_key.strip(),
+            model=model,
+            messages=[
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            base_url=base_url,
+            timeout=30,
+            allow_insecure_fallback=bool(config.get("allow_insecure_ssl", False)),
+        )
+    except Exception:
+        return None
+    txt = (raw or "").strip()
+    txt = re.sub(r"^```(?:json)?\s*", "", txt, flags=re.I | re.M)
+    txt = re.sub(r"\s*```\s*$", "", txt, flags=re.M).strip()
+    try:
+        obj = json.loads(txt)
+    except Exception:
+        return None
+    mode = str((obj or {}).get("mode", "")).strip().lower()
+    if mode in ("generic", "explicit"):
+        return mode
+    return None
+
+
+def resolve_query_mode(intent_text: str, config: dict[str, Any]) -> str:
+    """
+    Query mode resolution strategy:
+    1) lexical/regex baseline (cheap, deterministic)
+    2) LLM refinement when enabled + key available
+    3) fallback to baseline
+    """
+    base = classify_query_mode(intent_text)
+    if not (intent_text or "").strip():
+        return base
+    use_llm = (os.getenv("QUERY_MODE_USE_LLM", "true") or "true").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+    if not use_llm:
+        return base
+    llm_mode = _llm_classify_query_mode(intent_text, config)
+    if llm_mode in ("generic", "explicit"):
+        return llm_mode
+    return base
 
 
 def exclusions_only_system_block(mem: dict[str, Any]) -> str:
@@ -169,13 +324,13 @@ def memory_system_block_for_prompt(mem: dict[str, Any]) -> str:
 def attach_memory_to_config(config: dict[str, Any], repo_root: pathlib.Path) -> None:
     """把长期记忆注入 config；按 classify_query_mode 决定全量注入或仅排除信源。"""
     if not memory_enabled():
-        config["_query_mode"] = classify_query_mode(str(config.get("intent_text", "") or ""))
+        config["_query_mode"] = resolve_query_mode(str(config.get("intent_text", "") or ""), config)
         config["_user_memory_boost_keywords"] = []
         config["_user_memory_boost_categories"] = []
         return
     mem = load_user_memory(repo_root)
     intent_text = str(config.get("intent_text", "") or "")
-    mode = classify_query_mode(intent_text)
+    mode = resolve_query_mode(intent_text, config)
     config["_query_mode"] = mode
 
     excl = list(mem.get("excluded_source_substrings") or [])
