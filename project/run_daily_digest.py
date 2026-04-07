@@ -1240,6 +1240,16 @@ def cap_papers_by_ratio(items: list[dict], max_paper_ratio: float) -> list[dict]
     return dedupe_items(news + papers_sorted[:max_papers])
 
 
+def cap_total_items(items: list[dict], max_total: int) -> list[dict]:
+    if not items:
+        return items
+    try:
+        cap = max(1, int(max_total))
+    except (TypeError, ValueError):
+        cap = 10
+    return items[:cap]
+
+
 def category_order_key(name: str) -> tuple[int, str]:
     preferred = {
         "官方发布": 0,
@@ -1928,6 +1938,12 @@ def main() -> int:
     parser.add_argument("--out", default=DEFAULT_OUTPUT_DIR, help="Output docs directory")
     parser.add_argument("--limit", type=int, default=5, help="Max items per source")
     parser.add_argument(
+        "--final-items-total",
+        type=int,
+        default=10,
+        help="Final report total item cap (default: 10)",
+    )
+    parser.add_argument(
         "--webhook-url",
         default=os.getenv("DIGEST_WEBHOOK_URL", ""),
         help="Optional Feishu/DingTalk webhook URL",
@@ -2150,6 +2166,7 @@ def main() -> int:
     )
     items = cap_papers_by_ratio(items, max_paper_ratio=args.max_paper_ratio)
     items = rank_items_by_intent(items, getattr(args, "intent_text", ""))
+    items = cap_total_items(items, max_total=args.final_items_total)
     attach_content_excerpts_to_items(items, args.allow_insecure_ssl)
 
     llm_overview = ""

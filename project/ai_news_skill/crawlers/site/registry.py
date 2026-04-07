@@ -7,6 +7,7 @@ from .anthropic_news import AnthropicNewsCrawler
 from .openai_news import OpenAINewsCrawler
 from .huggingface_blog import HuggingFaceBlogCrawler
 from .techcrunch import TechCrunchAICrawler
+from .techmeme import TechmemeCrawler
 from .venturebeat import VentureBeatAICrawler
 
 
@@ -17,6 +18,7 @@ def all_crawlers() -> list[SiteCrawler]:
         AnthropicNewsCrawler(),
         HuggingFaceBlogCrawler(),
         TechCrunchAICrawler(),
+        TechmemeCrawler(),
         VentureBeatAICrawler(),
     ]
 

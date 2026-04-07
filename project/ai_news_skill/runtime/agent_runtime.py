@@ -48,6 +48,18 @@ def resolve_strict_intent_match(config: dict[str, Any]) -> bool:
     return raw not in ("0", "false", "no", "off")
 
 
+def resolve_final_items_total(config: dict[str, Any]) -> int:
+    """
+    Final report item cap (all modes share the same limit).
+    Priority: config.final_items_total -> env DIGEST_FINAL_ITEMS_TOTAL -> default 10.
+    """
+    raw = config.get("final_items_total", os.getenv("DIGEST_FINAL_ITEMS_TOTAL", 10))
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return 10
+
+
 def _env_truthy(name: str) -> bool:
     return (os.getenv(name) or "").strip().lower() in ("1", "true", "yes", "on")
 
@@ -726,6 +738,10 @@ def intent_stage(config: dict[str, Any], trace: dict[str, Any], items: list[dict
             "ok",
             extra={"mode": "user_memory_boost", "items": before_r},
         )
+    final_cap = resolve_final_items_total(config)
+    if len(items) > final_cap:
+        items = items[:final_cap]
+    emit_step(config, trace, "final_cap", "ok", extra={"max_items": final_cap, "items_after": len(items)})
     return items, []
 
 

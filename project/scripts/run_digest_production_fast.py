@@ -51,7 +51,7 @@ def main() -> int:
     from ai_news_skill.orchestration.langgraph_agent import run_with_graph
 
     window_h = _safe_int("FAST_WINDOW_HOURS", 24, min_v=6, max_v=24 * 14)
-    limit = _safe_int("FAST_LIMIT", 5, min_v=2, max_v=12)
+    limit = _safe_int("FAST_LIMIT", 10, min_v=2, max_v=20)
     detail_cap = _safe_int("FAST_SITE_MAX_DETAIL_ITEMS", 6, min_v=2, max_v=10)
     use_gnews = _truthy("FAST_GNEWS", False)
     use_public_api = _truthy("FAST_PUBLIC_API", False)
@@ -96,6 +96,7 @@ def main() -> int:
         "allow_os_public_api_feeds": use_public_api,
         "public_api_feed_max": _safe_int("FAST_PUBLIC_API_MAX", 4, min_v=1, max_v=10),
         "items_per_category_max": _safe_int("FAST_ITEMS_PER_CATEGORY_MAX", 8, min_v=2, max_v=20),
+        "final_items_total": _safe_int("FAST_FINAL_ITEMS_TOTAL", 10, min_v=1, max_v=50),
     }
 
     print(
@@ -110,6 +111,7 @@ def main() -> int:
             "public_api_enabled": cfg["allow_os_public_api_feeds"],
             "llm_intent_analysis": cfg["llm_intent_analysis"],
             "strict_intent_match": cfg["strict_intent_match"],
+            "final_items_total": cfg["final_items_total"],
         },
         flush=True,
     )

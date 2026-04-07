@@ -500,6 +500,7 @@ if user_text:
         "allow_os_public_api_feeds": bool(_show_public_feeds),
         "public_api_feed_max": int(public_api_feed_max),
         "items_per_category_max": int(items_cap),
+        "final_items_total": 10,
         # I/O 并行（见 run_daily_digest / agent_runtime）；也可用环境变量覆盖
         "collect_news_max_workers": int(os.getenv("COLLECT_NEWS_MAX_WORKERS", "12")),
         "excerpt_fetch_max_workers": int(os.getenv("EXCERPT_FETCH_MAX_WORKERS", "12")),
@@ -553,6 +554,7 @@ if user_text:
         reply = (
             f"本次时间窗口：**{days} 天**（{window_hours} 小时）；"
             f"条数上限：每信源/板块 **{items_cap}**，GNews **{gnews_cap}**。\n"
+            f"最终报告固定输出上限：**10 条**。\n"
             f"已完成：共抓取 {result.get('items', 0)} 条。\n报告路径：`{doc_path}`"
         )
         if doc_path.exists():

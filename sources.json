@@ -30,6 +30,11 @@
     "category": "行业资讯"
   },
   {
+    "name": "Techmeme",
+    "rss_url": "",
+    "category": "行业资讯"
+  },
+  {
     "name": "腾讯混元GitHub动态",
     "rss_url": "https://github.com/Tencent-Hunyuan/HunyuanDiT/commits/main.atom",
     "category": "国内厂商动态"
