@@ -260,29 +260,12 @@ nyt_api_key = ""
 public_api_feeds = ""
 public_api_feed_max = 8
 items_cap = 100
-gnews_cap = 100
+gnews_cap = 2
 
 with st.sidebar:
     st.header("运行设置")
-    if public_web_mode:
-        st.info("公开访问模式：本页填写的密钥仅保存在当前会话，不会写入 .env。")
     days = st.slider("时间窗口（天）", min_value=1, max_value=30, value=7)
-    items_cap = st.number_input(
-        "每信源 / RSS / 每板块最多条数",
-        min_value=1,
-        max_value=500,
-        value=100,
-        step=1,
-        help="同步写入 limit、items_per_category_max。",
-    )
-    gnews_cap = st.number_input(
-        "GNews 最多条数",
-        min_value=1,
-        max_value=500,
-        value=int(items_cap),
-        step=1,
-    )
-    use_llm = st.checkbox("启用 LLM 解读", value=True)
+    use_llm = True
 
     st.header("LLM")
     llm_provider = st.selectbox(
@@ -322,36 +305,16 @@ with st.sidebar:
             help="仅保存在当前浏览器会话",
         )
 
-    st.header("GNews")
-    gnews_enabled = st.checkbox(
-        "启用 GNews",
-        value=bool((st.session_state.get("GNEWS_API_KEY") or "").strip()),
-        help="搜索词由 LLM 从聊天中抽取",
-    )
+    st.header("扩展 API 信源")
     gnews_api_key = st.text_input(
         "GNEWS_API_KEY",
         value=st.session_state.get("GNEWS_API_KEY", ""),
         type="password",
     )
-    gnews_lang = st.selectbox("GNews 语言", ["en", "zh"], index=0)
-
-    st.header("扩展 API 信源")
-    public_api_feeds = st.text_input(
-        "PUBLIC_API_FEEDS",
-        value=st.session_state.get("PUBLIC_API_FEEDS", ""),
-        help="逗号分隔 id；例如：nyt,guardian",
-    )
     nyt_api_key = st.text_input(
         "NYTIMES_API_KEY",
         value=st.session_state.get("NYTIMES_API_KEY", ""),
         type="password",
-        help="当 PUBLIC_API_FEEDS 包含 nyt 时生效",
-    )
-    public_api_feed_max = st.number_input(
-        "PUBLIC_API_FEED_MAX",
-        min_value=1,
-        max_value=30,
-        value=int(st.session_state.get("PUBLIC_API_FEED_MAX", 8)),
     )
 
     if st.button("确认保存 API 配置", use_container_width=True):
@@ -376,8 +339,11 @@ with st.sidebar:
         st.session_state["OPENAI_BASE_URL"] = llm_base_url.strip()
         st.session_state["OPENAI_MODEL"] = openai_model.strip()
         st.session_state["LLM_PROVIDER"] = llm_provider
-        st.session_state["PUBLIC_API_FEEDS"] = (public_api_feeds or "").strip()
-        st.session_state["PUBLIC_API_FEED_MAX"] = int(public_api_feed_max)
+        _feeds: list[str] = []
+        if (st.session_state.get("NYTIMES_API_KEY", "") or "").strip():
+            _feeds.append("nyt")
+        st.session_state["PUBLIC_API_FEEDS"] = ",".join(_feeds)
+        st.session_state["PUBLIC_API_FEED_MAX"] = 8
         if llm_provider == "ark":
             st.session_state["api_ready"] = bool(
                 (st.session_state.get("ARK_API_KEY", "") or "").strip()
@@ -432,6 +398,7 @@ if user_text:
         st.chat_message("assistant").write(err)
         st.stop()
 
+    llm_provider = st.session_state.get("LLM_PROVIDER", llm_provider)
     _eff_ark_key = (st.session_state.get("ARK_API_KEY") or "").strip()
     _eff_openai_key = (st.session_state.get("OPENAI_API_KEY") or "").strip()
     _eff_gnews = (gnews_api_key or st.session_state.get("GNEWS_API_KEY", "")).strip()
@@ -443,6 +410,11 @@ if user_text:
     ).strip()
     if _eff_nyt:
         st.session_state["NYTIMES_API_KEY"] = _eff_nyt
+
+    public_api_feeds = st.session_state.get("PUBLIC_API_FEEDS", "")
+    public_api_feed_max = int(st.session_state.get("PUBLIC_API_FEED_MAX", 8))
+    gnews_enabled = bool(_eff_gnews)
+    gnews_lang = "en"
 
     if use_llm:
         if llm_provider == "ark":
@@ -573,7 +545,7 @@ if user_text:
         doc_path = pathlib.Path(result["doc_path"])
         reply = (
             f"本次时间窗口：**{days} 天**（{window_hours} 小时）；"
-            f"条数上限：每信源/板块 **{items_cap}**，GNews **{gnews_cap}**。\n"
+            f"条数上限：每信源/板块 **{items_cap}**，GNews **2**。\n"
             f"最终报告固定输出上限：**10 条**。\n"
             f"已完成：共抓取 {result.get('items', 0)} 条。\n报告路径：`{doc_path}`"
         )
