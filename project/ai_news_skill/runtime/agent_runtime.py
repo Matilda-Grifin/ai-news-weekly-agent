@@ -112,13 +112,20 @@ def init_run_context(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def _llm_model_from_config(config: dict[str, Any]) -> str:
+    provider = str(config.get("llm_provider", "auto")).strip().lower()
+    openai_model = (
+        str(config.get("openai_model", "")).strip()
+        or os.getenv("OPENAI_MODEL", "").strip()
+        or os.getenv("MODEL", "").strip()
+    )
+    if provider == "openai-compatible":
+        return openai_model or "gpt-4o-mini"
     return (
         str(config.get("ark_endpoint_id", "")).strip()
         or os.getenv("ARK_ENDPOINT_ID", "").strip()
         or str(config.get("ark_model", "")).strip()
         or os.getenv("ARK_MODEL", "").strip()
-        or os.getenv("OPENAI_MODEL", "").strip()
-        or os.getenv("MODEL", "").strip()
+        or openai_model
         or "Doubao-Seed-1.6-lite"
     )
 
@@ -994,7 +1001,7 @@ def enrich_stage(config: dict[str, Any], trace: dict[str, Any], items: list[dict
                 extra={"duration_ms": int((time.perf_counter() - _t_llm) * 1000)},
             )
         else:
-            model = runtime_config.ark_endpoint_id or runtime_config.ark_model or "Doubao-Seed-1.6-lite"
+            model = _llm_model_from_config(config)
 
             def _do_enrich() -> tuple[str, list[str], list[str], list[str]]:
                 return enrich_items_with_llm(
@@ -1164,6 +1171,7 @@ def _build_runtime_namespace(config: dict[str, Any]) -> Any:
         ark_api_key = str(config.get("ark_api_key", "")).strip()
         ark_endpoint_id = str(config.get("ark_endpoint_id", "")).strip()
         ark_model = str(config.get("ark_model", "Doubao-Seed-1.6-lite")).strip()
+        openai_model = str(config.get("openai_model", "")).strip()
 
     return NS()
 

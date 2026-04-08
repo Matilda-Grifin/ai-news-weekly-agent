@@ -99,6 +99,10 @@ def _declared_env_keys() -> set[str]:
 
 _load_repo_dotenv()
 
+
+def _is_true_env(name: str) -> bool:
+    return (os.getenv(name, "").strip().lower() in ("1", "true", "yes", "on"))
+
 st.set_page_config(page_title="AI News Agent Console", page_icon="📰", layout="wide")
 st.title("AI 新闻 Agent")
 st.caption("聊天式意图输入 + 任务规划 + 新闻执行")
@@ -203,20 +207,6 @@ def _step_label(name: str) -> str:
     return mapping.get(name, "执行步骤")
 
 
-if "chat_messages" not in st.session_state:
-    st.session_state["chat_messages"] = []
-if "api_ready" not in st.session_state:
-    # 根目录 .env 已填 LLM Key 时，无需每次再点「确认保存」
-    st.session_state["api_ready"] = bool(
-        (os.getenv("ARK_API_KEY") or "").strip() or (os.getenv("OPENAI_API_KEY") or "").strip()
-    )
-if "ARK_API_KEY" not in st.session_state and os.getenv("ARK_API_KEY"):
-    st.session_state["ARK_API_KEY"] = os.getenv("ARK_API_KEY", "")
-if "OPENAI_API_KEY" not in st.session_state and os.getenv("OPENAI_API_KEY"):
-    st.session_state["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY", "")
-if "GNEWS_API_KEY" not in st.session_state and os.getenv("GNEWS_API_KEY"):
-    st.session_state["GNEWS_API_KEY"] = os.getenv("GNEWS_API_KEY", "")
-
 def _env_int(name: str, default: int) -> int:
     raw = (os.getenv(name) or "").strip()
     if not raw:
@@ -227,163 +217,183 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-_declared = _declared_env_keys()
-_show_ark = any(k in _declared for k in ("ARK_API_KEY", "ARK_ENDPOINT_ID", "ARK_MODEL", "ARK_Model"))
-_show_openai = any(
-    k in _declared for k in ("OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_MODEL")
-)
-_show_gnews = "GNEWS_API_KEY" in _declared
-_show_public_feeds = "PUBLIC_API_FEEDS" in _declared or "PUBLIC_API_FEED_MAX" in _declared
-_show_digest_items_cap = "DIGEST_UI_ITEMS_CAP" in _declared
-_show_digest_gnews_max = "DIGEST_UI_GNEWS_MAX" in _declared
+if "chat_messages" not in st.session_state:
+    st.session_state["chat_messages"] = []
+public_web_mode = _is_true_env("PUBLIC_WEB_MODE")
+if "api_ready" not in st.session_state:
+    st.session_state["api_ready"] = False
+if "LLM_PROVIDER" not in st.session_state:
+    st.session_state["LLM_PROVIDER"] = "ark"
+if "ARK_ENDPOINT_ID" not in st.session_state:
+    st.session_state["ARK_ENDPOINT_ID"] = ""
+if "ARK_MODEL" not in st.session_state:
+    st.session_state["ARK_MODEL"] = "Doubao-Seed-1.6-lite"
+if "OPENAI_BASE_URL" not in st.session_state:
+    st.session_state["OPENAI_BASE_URL"] = ""
+if "OPENAI_MODEL" not in st.session_state:
+    st.session_state["OPENAI_MODEL"] = "gpt-4o-mini"
+if "ARK_API_KEY" not in st.session_state:
+    st.session_state["ARK_API_KEY"] = ""
+if "OPENAI_API_KEY" not in st.session_state:
+    st.session_state["OPENAI_API_KEY"] = ""
+if "GNEWS_API_KEY" not in st.session_state:
+    st.session_state["GNEWS_API_KEY"] = ""
+if "NYTIMES_API_KEY" not in st.session_state:
+    st.session_state["NYTIMES_API_KEY"] = ""
+if "PUBLIC_API_FEEDS" not in st.session_state:
+    st.session_state["PUBLIC_API_FEEDS"] = ""
+if "PUBLIC_API_FEED_MAX" not in st.session_state:
+    st.session_state["PUBLIC_API_FEED_MAX"] = 8
 
 # 下面聊天区会用到；若某块未在 .env 列出，则用安全默认且不在侧栏展示
 llm_provider = "ark"
 llm_base_url = ""
-ark_model = os.getenv("ARK_MODEL") or os.getenv("ARK_Model") or "Doubao-Seed-1.6-lite"
-ark_endpoint_id = os.getenv("ARK_ENDPOINT_ID", "")
-openai_model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+ark_model = "Doubao-Seed-1.6-lite"
+ark_endpoint_id = ""
+openai_model = "gpt-4o-mini"
 ark_api_key = ""
 openai_api_key = ""
 gnews_enabled = False
 gnews_api_key = ""
 gnews_lang = "en"
-public_api_feeds = (os.getenv("PUBLIC_API_FEEDS", "") or "").strip()
-try:
-    public_api_feed_max = max(1, min(30, int(os.getenv("PUBLIC_API_FEED_MAX", "8"))))
-except ValueError:
-    public_api_feed_max = 8
-items_cap = _env_int("DIGEST_UI_ITEMS_CAP", 100)
-gnews_cap = _env_int("DIGEST_UI_GNEWS_MAX", items_cap)
+nyt_api_key = ""
+public_api_feeds = ""
+public_api_feed_max = 8
+items_cap = 100
+gnews_cap = 100
 
 with st.sidebar:
     st.header("运行设置")
+    if public_web_mode:
+        st.info("公开访问模式：本页填写的密钥仅保存在当前会话，不会写入 .env。")
     days = st.slider("时间窗口（天）", min_value=1, max_value=30, value=7)
-    if _show_digest_items_cap:
-        items_cap = st.number_input(
-            "每信源 / RSS / 每板块最多条数",
-            min_value=1,
-            max_value=500,
-            value=_env_int("DIGEST_UI_ITEMS_CAP", 100),
-            step=1,
-            help="同步写入 limit、items_per_category_max。",
-        )
-    else:
-        st.caption("每板块条数使用默认（可在 .env 增加 `DIGEST_UI_ITEMS_CAP` 后在侧栏调节）。")
-    if _show_gnews and _show_digest_gnews_max:
-        gnews_cap = st.number_input(
-            "GNews 最多条数",
-            min_value=1,
-            max_value=500,
-            value=_env_int("DIGEST_UI_GNEWS_MAX", items_cap),
-            step=1,
-        )
-    elif _show_gnews:
-        gnews_cap = _env_int("DIGEST_UI_GNEWS_MAX", items_cap)
-    st.caption(
-        "时间窗口 = 天数×24 小时；**改窗口或条数后请再发一条消息**才会重跑。"
+    items_cap = st.number_input(
+        "每信源 / RSS / 每板块最多条数",
+        min_value=1,
+        max_value=500,
+        value=100,
+        step=1,
+        help="同步写入 limit、items_per_category_max。",
     )
-    st.caption(
-        "抓取结果默认**仅保留与意图关键词匹配的条目**（与原先侧栏「严格」一致），由后台 "
-        "`STRICT_INTENT_MATCH` 控制，默认开启；需在 .env 写 `STRICT_INTENT_MATCH=false` 可关闭。"
+    gnews_cap = st.number_input(
+        "GNews 最多条数",
+        min_value=1,
+        max_value=500,
+        value=int(items_cap),
+        step=1,
     )
     use_llm = st.checkbox("启用 LLM 解读", value=True)
 
-    if not _show_ark and not _show_openai:
-        st.warning("请在仓库根目录 `.env` / `.ENV` 中至少写明 `ARK_*` 或 `OPENAI_*`，侧栏才会出现对应 LLM 配置。")
-    else:
-        st.header("LLM（与 .env 中列出的项一致）")
-        if _show_ark and _show_openai:
-            llm_provider = st.selectbox("LLM Provider", ["ark", "openai-compatible"], index=0)
-        elif _show_openai:
-            llm_provider = "openai-compatible"
-        else:
-            llm_provider = "ark"
+    st.header("LLM")
+    llm_provider = st.selectbox(
+        "LLM Provider",
+        ["ark", "openai-compatible"],
+        index=0 if st.session_state.get("LLM_PROVIDER", "ark") == "ark" else 1,
+    )
 
-        if llm_provider == "ark" and _show_ark:
-            ark_endpoint_id = st.text_input(
-                "ARK_ENDPOINT_ID",
-                value=os.getenv("ARK_ENDPOINT_ID", ""),
-                help="来自 .env；可在此覆盖当前会话",
-            )
-            ark_model = st.text_input(
-                "ARK_MODEL",
-                value=os.getenv("ARK_MODEL") or os.getenv("ARK_Model") or "Doubao-Seed-1.6-lite",
-            )
-            ark_api_key = st.text_input(
-                "ARK_API_KEY",
-                value=(st.session_state.get("ARK_API_KEY") or os.getenv("ARK_API_KEY", "")),
-                type="password",
-                help="留空则使用 .env 中已加载的值；仅在需临时覆盖时填写",
-            )
-        if llm_provider == "openai-compatible" and _show_openai:
-            llm_base_url = st.text_input(
-                "OPENAI_BASE_URL",
-                value=os.getenv("OPENAI_BASE_URL", ""),
-            )
-            openai_model = st.text_input(
-                "OPENAI_MODEL",
-                value=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
-            )
-            openai_api_key = st.text_input(
-                "OPENAI_API_KEY",
-                value=(st.session_state.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY", "")),
-                type="password",
-                help="留空则使用 .env 中已加载的值",
-            )
-
-    if _show_gnews:
-        st.header("GNews")
-        _gnews_default = bool((st.session_state.get("GNEWS_API_KEY") or os.getenv("GNEWS_API_KEY", "")).strip())
-        gnews_enabled = st.checkbox(
-            "启用 GNews",
-            value=_gnews_default,
-            help="搜索词由 LLM 从聊天中抽取；Key 来自 .env 的 GNEWS_API_KEY",
+    if llm_provider == "ark":
+        ark_endpoint_id = st.text_input(
+            "ARK_ENDPOINT_ID",
+            value=st.session_state.get("ARK_ENDPOINT_ID", ""),
         )
-        gnews_api_key = st.text_input(
-            "GNEWS_API_KEY（留空则用 .env）",
-            value=(st.session_state.get("GNEWS_API_KEY") or os.getenv("GNEWS_API_KEY", "")),
+        ark_model = st.text_input(
+            "ARK_MODEL",
+            value=st.session_state.get("ARK_MODEL", "Doubao-Seed-1.6-lite"),
+        )
+        ark_api_key = st.text_input(
+            "ARK_API_KEY",
+            value=st.session_state.get("ARK_API_KEY", ""),
             type="password",
+            help="仅保存在当前浏览器会话",
         )
-        gnews_lang = st.selectbox("GNews 语言", ["en", "zh"], index=0)
+    if llm_provider == "openai-compatible":
+        llm_base_url = st.text_input(
+            "OPENAI_BASE_URL",
+            value=st.session_state.get("OPENAI_BASE_URL", ""),
+        )
+        openai_model = st.text_input(
+            "OPENAI_MODEL",
+            value=st.session_state.get("OPENAI_MODEL", "gpt-4o-mini"),
+        )
+        openai_api_key = st.text_input(
+            "OPENAI_API_KEY",
+            value=st.session_state.get("OPENAI_API_KEY", ""),
+            type="password",
+            help="仅保存在当前浏览器会话",
+        )
 
-    if _show_public_feeds:
-        st.header("扩展 API 信源")
-        public_api_feeds = st.text_input(
-            "PUBLIC_API_FEEDS",
-            value=os.getenv("PUBLIC_API_FEEDS", ""),
-            help="逗号分隔 id；与 public_api_feeds.py 中一致",
-        )
-        try:
-            _paf_max_default = int(os.getenv("PUBLIC_API_FEED_MAX", "8"))
-        except ValueError:
-            _paf_max_default = 8
-        public_api_feed_max = st.number_input(
-            "PUBLIC_API_FEED_MAX",
-            min_value=1,
-            max_value=30,
-            value=max(1, min(30, _paf_max_default)),
-        )
+    st.header("GNews")
+    gnews_enabled = st.checkbox(
+        "启用 GNews",
+        value=bool((st.session_state.get("GNEWS_API_KEY") or "").strip()),
+        help="搜索词由 LLM 从聊天中抽取",
+    )
+    gnews_api_key = st.text_input(
+        "GNEWS_API_KEY",
+        value=st.session_state.get("GNEWS_API_KEY", ""),
+        type="password",
+    )
+    gnews_lang = st.selectbox("GNews 语言", ["en", "zh"], index=0)
+
+    st.header("扩展 API 信源")
+    public_api_feeds = st.text_input(
+        "PUBLIC_API_FEEDS",
+        value=st.session_state.get("PUBLIC_API_FEEDS", ""),
+        help="逗号分隔 id；例如：nyt,guardian",
+    )
+    nyt_api_key = st.text_input(
+        "NYTIMES_API_KEY",
+        value=st.session_state.get("NYTIMES_API_KEY", ""),
+        type="password",
+        help="当 PUBLIC_API_FEEDS 包含 nyt 时生效",
+    )
+    public_api_feed_max = st.number_input(
+        "PUBLIC_API_FEED_MAX",
+        min_value=1,
+        max_value=30,
+        value=int(st.session_state.get("PUBLIC_API_FEED_MAX", 8)),
+    )
 
     if st.button("确认保存 API 配置", use_container_width=True):
         if ark_api_key.strip():
             st.session_state["ARK_API_KEY"] = ark_api_key.strip()
-            os.environ["ARK_API_KEY"] = ark_api_key.strip()
+        else:
+            st.session_state.pop("ARK_API_KEY", None)
         if openai_api_key.strip():
             st.session_state["OPENAI_API_KEY"] = openai_api_key.strip()
-            os.environ["OPENAI_API_KEY"] = openai_api_key.strip()
+        else:
+            st.session_state.pop("OPENAI_API_KEY", None)
         if gnews_api_key.strip():
             st.session_state["GNEWS_API_KEY"] = gnews_api_key.strip()
-            os.environ["GNEWS_API_KEY"] = gnews_api_key.strip()
-        if ark_endpoint_id.strip():
-            os.environ["ARK_ENDPOINT_ID"] = ark_endpoint_id.strip()
-        if ark_model.strip():
-            os.environ["ARK_MODEL"] = ark_model.strip()
-        st.session_state["api_ready"] = True
+        else:
+            st.session_state.pop("GNEWS_API_KEY", None)
+        if nyt_api_key.strip():
+            st.session_state["NYTIMES_API_KEY"] = nyt_api_key.strip()
+        else:
+            st.session_state.pop("NYTIMES_API_KEY", None)
+        st.session_state["ARK_ENDPOINT_ID"] = ark_endpoint_id.strip()
+        st.session_state["ARK_MODEL"] = ark_model.strip()
+        st.session_state["OPENAI_BASE_URL"] = llm_base_url.strip()
+        st.session_state["OPENAI_MODEL"] = openai_model.strip()
+        st.session_state["LLM_PROVIDER"] = llm_provider
+        st.session_state["PUBLIC_API_FEEDS"] = (public_api_feeds or "").strip()
+        st.session_state["PUBLIC_API_FEED_MAX"] = int(public_api_feed_max)
+        if llm_provider == "ark":
+            st.session_state["api_ready"] = bool(
+                (st.session_state.get("ARK_API_KEY", "") or "").strip()
+                and (st.session_state.get("ARK_ENDPOINT_ID", "") or "").strip()
+                and (st.session_state.get("ARK_MODEL", "") or "").strip()
+            )
+        else:
+            st.session_state["api_ready"] = bool(
+                (st.session_state.get("OPENAI_API_KEY", "") or "").strip()
+                and (st.session_state.get("OPENAI_BASE_URL", "") or "").strip()
+                and (st.session_state.get("OPENAI_MODEL", "") or "").strip()
+            )
     if st.session_state.get("api_ready"):
-        st.success("已就绪：可直接在下方输入意图执行（或再点保存以覆盖会话中的 Key）")
+        st.success("已就绪：可直接在下方输入意图执行")
     else:
-        st.warning("请在 .env 中配置 LLM Key，或填写上方密码框后点「确认保存 API 配置」")
+        st.warning("请填写并保存 LLM 配置后再执行")
 
     st.header("历史记录")
     history_path = _repo_root() / "runs" / "history.jsonl"
@@ -422,16 +432,17 @@ if user_text:
         st.chat_message("assistant").write(err)
         st.stop()
 
-    _eff_ark_key = (st.session_state.get("ARK_API_KEY") or os.getenv("ARK_API_KEY", "")).strip()
-    _eff_openai_key = (st.session_state.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY", "")).strip()
-    if _eff_ark_key:
-        os.environ["ARK_API_KEY"] = _eff_ark_key
-    if _eff_openai_key:
-        os.environ["OPENAI_API_KEY"] = _eff_openai_key
-    _eff_gnews = (gnews_api_key or st.session_state.get("GNEWS_API_KEY", "") or os.getenv("GNEWS_API_KEY", "")).strip()
+    _eff_ark_key = (st.session_state.get("ARK_API_KEY") or "").strip()
+    _eff_openai_key = (st.session_state.get("OPENAI_API_KEY") or "").strip()
+    _eff_gnews = (gnews_api_key or st.session_state.get("GNEWS_API_KEY", "")).strip()
     if _eff_gnews:
         st.session_state["GNEWS_API_KEY"] = _eff_gnews
-        os.environ["GNEWS_API_KEY"] = _eff_gnews
+    _eff_nyt = (
+        nyt_api_key
+        or st.session_state.get("NYTIMES_API_KEY", "")
+    ).strip()
+    if _eff_nyt:
+        st.session_state["NYTIMES_API_KEY"] = _eff_nyt
 
     if use_llm:
         if llm_provider == "ark":
@@ -462,6 +473,13 @@ if user_text:
                 st.chat_message("assistant").write(err)
                 st.stop()
 
+    _normalized_feeds = {x.strip().lower() for x in (public_api_feeds or "").split(",") if x.strip()}
+    if any(fid in _normalized_feeds for fid in ("nyt", "newyorktimes")) and not _eff_nyt:
+        err = "当前已启用 nyt 扩展源，请先在左侧填写 NYTIMES_API_KEY 并点击“确认保存 API 配置”。"
+        st.session_state["chat_messages"].append({"role": "assistant", "content": err})
+        st.chat_message("assistant").write(err)
+        st.stop()
+
     plan, plan_tasks = _infer_plan(user_text)
 
     _root = _repo_root()
@@ -485,6 +503,7 @@ if user_text:
         "llm_base_url": llm_base_url.strip(),
         "ark_model": ark_model.strip(),
         "ark_endpoint_id": ark_endpoint_id.strip(),
+        "openai_model": openai_model.strip(),
         "ark_api_key": _eff_ark_key,
         "allow_custom_llm_endpoint": False,
         "allow_insecure_ssl": True,
@@ -497,9 +516,10 @@ if user_text:
         "gnews_category": "行业资讯",
         "llm_intent_analysis": True,
         "gnews_per_keyword": True,
-        "public_api_feeds": (public_api_feeds or "").strip() if _show_public_feeds else "",
-        "allow_os_public_api_feeds": bool(_show_public_feeds),
+        "public_api_feeds": (public_api_feeds or "").strip(),
+        "allow_os_public_api_feeds": False,
         "public_api_feed_max": int(public_api_feed_max),
+        "nyt_api_key": _eff_nyt,
         "items_per_category_max": int(items_cap),
         "items_per_source_max": 1,
         "final_items_total": 10,
@@ -512,8 +532,6 @@ if user_text:
     if _use_tool_agent_mcp_route(use_llm, _root):
         config["mcp_servers_json"] = str(_root / "mcp_servers.json")
     attach_memory_to_config(config, _root)
-    if llm_provider == "openai-compatible" and openai_model.strip():
-        os.environ["OPENAI_MODEL"] = openai_model.strip()
 
     try:
         _mr = int(os.getenv("DIGEST_MAX_RETRIES", "2"))
@@ -582,6 +600,8 @@ if user_text:
             "api_keys": {
                 "ark": _mask_key(st.session_state.get("ARK_API_KEY", "")),
                 "openai": _mask_key(st.session_state.get("OPENAI_API_KEY", "")),
+                "gnews": _mask_key(st.session_state.get("GNEWS_API_KEY", "")),
+                "nyt": _mask_key(st.session_state.get("NYTIMES_API_KEY", "")),
             },
         }
         append_jsonl_record(str(_repo_root() / "runs" / "history.jsonl"), audit)

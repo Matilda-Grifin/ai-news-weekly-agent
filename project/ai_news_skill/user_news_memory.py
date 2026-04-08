@@ -237,12 +237,17 @@ def _llm_classify_query_mode(intent_text: str, config: dict[str, Any]) -> str | 
     if not (api_key or "").strip():
         return None
 
-    model = (
-        str(config.get("ark_endpoint_id", "")).strip()
-        or str(config.get("ark_model", "")).strip()
-        or os.getenv("OPENAI_MODEL", "").strip()
-        or "Doubao-Seed-1.6-lite"
-    )
+    provider = str(config.get("llm_provider", "auto")).strip().lower()
+    if provider == "openai-compatible":
+        model = str(config.get("openai_model", "")).strip() or os.getenv("OPENAI_MODEL", "").strip() or "gpt-4o-mini"
+    else:
+        model = (
+            str(config.get("ark_endpoint_id", "")).strip()
+            or str(config.get("ark_model", "")).strip()
+            or str(config.get("openai_model", "")).strip()
+            or os.getenv("OPENAI_MODEL", "").strip()
+            or "Doubao-Seed-1.6-lite"
+        )
     sys_prompt = (
         "你是一个意图分类器。只做二分类并返回 JSON。\n"
         "分类定义：\n"
@@ -507,11 +512,16 @@ def maybe_update_memory_with_llm(
         return None
     if not (ak or "").strip():
         return None
-    model = (
-        str(config.get("ark_endpoint_id", "")).strip()
-        or str(config.get("ark_model", "")).strip()
-        or "Doubao-Seed-1.6-lite"
-    )
+    provider = str(config.get("llm_provider", "auto")).strip().lower()
+    if provider == "openai-compatible":
+        model = str(config.get("openai_model", "")).strip() or os.getenv("OPENAI_MODEL", "").strip() or "gpt-4o-mini"
+    else:
+        model = (
+            str(config.get("ark_endpoint_id", "")).strip()
+            or str(config.get("ark_model", "")).strip()
+            or str(config.get("openai_model", "")).strip()
+            or "Doubao-Seed-1.6-lite"
+        )
     current = load_user_memory(repo_root)
     conv = f"用户说：{user_message[:4000]}\n\n助手摘要：{assistant_summary[:4000]}"
     user_payload = (

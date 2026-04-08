@@ -217,3 +217,31 @@ cp mcp_servers.example.json mcp_servers.json
 ```
 
 Then update command/env based on your local MCP servers.
+
+---
+
+## Public Web Mode (Visitors Bring Their Own Keys)
+
+This project supports a public Streamlit page where each visitor enters their own API keys in the sidebar.
+
+- Set `PUBLIC_WEB_MODE=true` on the server to force public-session behavior.
+- Keys entered in sidebar are session-only (`st.session_state`) and are not written back to `.env` / `.ENV` or shared through process env overrides.
+- Sensitive password fields are no longer prefilled from server environment variables in public mode.
+- For third-party feeds, put `nyt` in `PUBLIC_API_FEEDS` and enter `NYTIMES_API_KEY` in UI (now grouped with GNews/Public API settings).
+- If `PUBLIC_API_FEEDS` includes `nyt` but no NYT key is provided, UI will stop the run with a clear prompt.
+- For public deployment, keep server `.env` minimal and avoid placing personal production keys in repository or host disk.
+
+---
+
+## 24/7 Deploy on Alibaba Cloud VM (Streamlit + Nginx)
+
+Recommended production route:
+
+1. Run Streamlit as a system service (`systemd`) on port `8501`.
+2. Put Nginx in front (ports `80/443`) and reverse-proxy to `127.0.0.1:8501`.
+3. Enable HTTPS with Let's Encrypt.
+4. Restrict cloud security group to `80/443` (and `22` only for admin IPs).
+
+Detailed commands and sample configs are in:
+
+- `project/docs/aliyun-streamlit-deploy.md`

@@ -31,6 +31,7 @@ def _build_runtime_namespace(config: dict[str, Any]) -> Any:
         ark_api_key = str(config.get("ark_api_key", "")).strip()
         ark_endpoint_id = str(config.get("ark_endpoint_id", "")).strip()
         ark_model = str(config.get("ark_model", "Doubao-Seed-1.6-lite")).strip()
+        openai_model = str(config.get("openai_model", "")).strip()
 
     return NS()
 
@@ -72,7 +73,10 @@ def _build_executor(
     )
     runtime = _build_runtime_namespace(base_config)
     _provider, base_url, api_key = resolve_llm_runtime(runtime)
-    model = runtime.ark_endpoint_id or runtime.ark_model or "Doubao-Seed-1.6-lite"
+    if _provider == "openai-compatible":
+        model = runtime.openai_model or runtime.ark_model or "gpt-4o-mini"
+    else:
+        model = runtime.ark_endpoint_id or runtime.ark_model or "Doubao-Seed-1.6-lite"
     llm = build_chat_openai(
         api_key=api_key,
         model=model,

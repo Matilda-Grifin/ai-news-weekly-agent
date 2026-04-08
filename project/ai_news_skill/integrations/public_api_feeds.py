@@ -96,6 +96,19 @@ def _enabled_set(config: dict[str, Any] | None) -> set[str]:
     return out
 
 
+def _config_or_env(config: dict[str, Any] | None, *names: str, default: str = "") -> str:
+    if config:
+        for name in names:
+            value = str(config.get(name, "") or "").strip()
+            if value:
+                return value
+    for name in names:
+        value = (os.getenv(name) or "").strip()
+        if value:
+            return value
+    return default
+
+
 def _parse_iso_window(
     raw: str, *, now_dt, cutoff
 ):
@@ -739,38 +752,39 @@ def _run_one(
     window_hours: int,
     max_per: int,
     allow_cb: bool,
+    config: dict[str, Any] | None = None,
 ) -> tuple[list[dict], str | None]:
     if fid == "nyt":
-        key = (os.getenv("NYTIMES_API_KEY") or os.getenv("NYT_API_KEY") or "").strip()
+        key = _config_or_env(config, "nyt_api_key", "NYTIMES_API_KEY", "NYT_API_KEY")
         if not key:
             return [], "nyt: missing NYTIMES_API_KEY or NYT_API_KEY"
         return _fetch_nyt(api_key=key, window_hours=window_hours, max_per=max_per, allow_cb=allow_cb)
     if fid == "guardian":
-        key = (os.getenv("GUARDIAN_API_KEY") or "").strip()
+        key = _config_or_env(config, "guardian_api_key", "GUARDIAN_API_KEY")
         if not key:
             return [], "guardian: missing GUARDIAN_API_KEY"
         return _fetch_guardian(api_key=key, window_hours=window_hours, max_per=max_per, allow_cb=allow_cb)
     if fid == "fmp":
-        key = (os.getenv("FMP_API_KEY") or "").strip()
+        key = _config_or_env(config, "fmp_api_key", "FMP_API_KEY")
         if not key:
             return [], "fmp: missing FMP_API_KEY"
         return _fetch_fmp(api_key=key, window_hours=window_hours, max_per=max_per, allow_cb=allow_cb)
     if fid == "spaceflight":
         return _fetch_spaceflight(window_hours=window_hours, max_per=max_per, allow_cb=allow_cb)
     if fid == "nasa":
-        key = (os.getenv("NASA_API_KEY") or "DEMO_KEY").strip()
+        key = _config_or_env(config, "nasa_api_key", "NASA_API_KEY", default="DEMO_KEY")
         return _fetch_nasa_apod(api_key=key, window_hours=window_hours, allow_cb=allow_cb)
     if fid == "hackernews":
         return _fetch_hackernews(window_hours=window_hours, max_per=max_per, allow_cb=allow_cb)
     if fid == "github":
-        tok = (os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN") or "").strip()
+        tok = _config_or_env(config, "github_token", "GITHUB_TOKEN", "GH_TOKEN")
         return _fetch_github_releases(
             token=tok, window_hours=window_hours, max_per=max_per, allow_cb=allow_cb
         )
     if fid == "devto":
         return _fetch_devto(window_hours=window_hours, max_per=max_per, allow_cb=allow_cb)
     if fid == "producthunt":
-        tok = (os.getenv("PRODUCT_HUNT_TOKEN") or "").strip()
+        tok = _config_or_env(config, "product_hunt_token", "PRODUCT_HUNT_TOKEN")
         if not tok:
             return [], "producthunt: missing PRODUCT_HUNT_TOKEN"
         return _fetch_producthunt(
@@ -809,14 +823,14 @@ def collect_public_api_feed_items(
     workers = min(8, max(1, len(enabled)))
     if workers <= 1 or len(enabled) == 1:
         for fid in sorted(enabled):
-            chunk, err = _run_one(fid, window_hours=window_hours, max_per=mp, allow_cb=allow_cb)
+            chunk, err = _run_one(fid, window_hours=window_hours, max_per=mp, allow_cb=allow_cb, config=config)
             items.extend(chunk)
             if err:
                 errors.append(err)
     else:
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futs = {
-                pool.submit(_run_one, fid, window_hours=window_hours, max_per=mp, allow_cb=allow_cb): fid
+                pool.submit(_run_one, fid, window_hours=window_hours, max_per=mp, allow_cb=allow_cb, config=config): fid
                 for fid in sorted(enabled)
             }
             for fut in as_completed(futs):
