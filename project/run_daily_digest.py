@@ -1036,6 +1036,21 @@ def cap_items_per_category(items: list[dict], max_per: int = 5) -> list[dict]:
     return dedupe_items(out)
 
 
+def cap_items_per_source(items: list[dict], max_per_source: int = 1) -> list[dict]:
+    """每个 source 最多保留 max_per_source 条（保持当前排序稳定）。"""
+    if not items or max_per_source <= 0:
+        return items
+    seen: dict[str, int] = defaultdict(int)
+    out: list[dict] = []
+    for it in items:
+        src = str(it.get("source", "未知信源") or "未知信源")
+        if seen[src] >= max_per_source:
+            continue
+        seen[src] += 1
+        out.append(it)
+    return out
+
+
 def fetch_gnews_articles(
     *,
     query: str,

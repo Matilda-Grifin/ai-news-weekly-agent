@@ -2,6 +2,7 @@
 import json
 import os
 import pathlib
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -18,6 +19,7 @@ from run_daily_digest import (
     attach_content_excerpts_to_items,
     balance_items,
     cap_items_per_category,
+    cap_items_per_source,
     cap_papers_by_ratio,
     collect_news,
     dedupe_items,
@@ -121,6 +123,117 @@ def _llm_model_from_config(config: dict[str, Any]) -> str:
     )
 
 
+def _parse_query_list_json(raw: str) -> list[str]:
+    txt = (raw or "").strip()
+    if not txt:
+        return []
+    txt = re.sub(r"^```(?:json)?\s*", "", txt, flags=re.I | re.M)
+    txt = re.sub(r"\s*```\s*$", "", txt, flags=re.M).strip()
+    if not txt:
+        return []
+    try:
+        data = json.loads(txt)
+    except Exception:
+        m = re.search(r"(\[[\s\S]*\]|\{[\s\S]*\})", txt)
+        if not m:
+            return []
+        try:
+            data = json.loads(m.group(1))
+        except Exception:
+            return []
+    out: list[str] = []
+    if isinstance(data, list):
+        out = [str(x).strip() for x in data if str(x).strip()]
+    elif isinstance(data, dict):
+        arr = data.get("queries") or data.get("keywords") or []
+        if isinstance(arr, list):
+            out = [str(x).strip() for x in arr if str(x).strip()]
+    dedup: list[str] = []
+    seen: set[str] = set()
+    for q in out:
+        low = q.lower()
+        if low in seen:
+            continue
+        seen.add(low)
+        dedup.append(q)
+    return dedup[:16]
+
+
+def _expand_keywords_with_english_aliases(
+    keywords: list[str],
+    intent_text: str,
+    config: dict[str, Any],
+) -> list[str]:
+    """
+    Expand CN / mixed-language intent keywords to English search aliases.
+    Fallback-safe: on any failure, return original keywords unchanged.
+    """
+    if not keywords:
+        return keywords
+    use_expand = (os.getenv("INTENT_KEYWORDS_EN_EXPAND", "true") or "true").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+    if not use_expand:
+        return keywords
+    has_non_ascii = any(any(ord(ch) > 127 for ch in str(k)) for k in keywords) or any(
+        ord(ch) > 127 for ch in (intent_text or "")
+    )
+    if not has_non_ascii:
+        return keywords
+    try:
+        rt = _build_runtime_namespace(config)
+        _provider, base_url, ak = resolve_llm_runtime(rt)
+    except Exception:
+        return keywords
+    if not (ak or "").strip():
+        return keywords
+    sys_prompt = (
+        "你是新闻检索词扩展助手。"
+        "给定用户意图与已有关键词，补充可用于英文新闻搜索的英文/同义词短语。"
+        "要求：保留原词含义，不要编造事实；输出 JSON，格式为"
+        "{\"queries\":[\"...\"]}，仅数组，不要解释。"
+    )
+    user_prompt = (
+        f"用户意图：{(intent_text or '').strip()}\n"
+        f"已有关键词：{json.dumps(keywords, ensure_ascii=False)}\n"
+        "请返回英文搜索扩展词（可含 multi-agent / agent framework 这类短语）。"
+    )
+    try:
+        from run_daily_digest import call_chat_completion
+
+        raw = call_chat_completion(
+            api_key=ak.strip(),
+            model=_llm_model_from_config(config),
+            messages=[
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            base_url=base_url,
+            timeout=30,
+            allow_insecure_fallback=bool(config.get("allow_insecure_ssl", False)),
+        )
+    except Exception:
+        return keywords
+    extra = _parse_query_list_json(raw)
+    if not extra:
+        return keywords
+    out = list(keywords)
+    seen = {str(k).strip().lower() for k in out if str(k).strip()}
+    for q in extra:
+        t = str(q).strip()
+        if not t:
+            continue
+        low = t.lower()
+        if low in seen:
+            continue
+        out.append(t)
+        seen.add(low)
+    return out[:24]
+
+
 def _worker_cap(config: dict[str, Any], key: str, default: int, env_key: str) -> int:
     """Parallel worker count from config or env (minimum 1)."""
     v = config.get(key)
@@ -180,6 +293,7 @@ def intent_plan_stage(config: dict[str, Any], trace: dict[str, Any]) -> dict[str
             pass
     if not keywords:
         keywords = extract_intent_keywords(intent_for_llm if aug else intent_text)
+    keywords = _expand_keywords_with_english_aliases(keywords, intent_text, config)
     lower_kw = [k.lower() for k in keywords]
     plan: dict[str, Any] = {
         "keywords": keywords,
@@ -592,8 +706,53 @@ def collect_stage(config: dict[str, Any], trace: dict[str, Any], intent_plan: di
             ]
         ).lower()
 
-    if keywords and items:
-        matched = [it for it in items if any(k in _intent_hay(it) for k in keywords)]
+    def _ai_context_ok(hay: str) -> bool:
+        ai_terms = (
+            " ai ",
+            "artificial intelligence",
+            "llm",
+            "gpt",
+            "chatgpt",
+            "claude",
+            "anthropic",
+            "openai",
+            "ai model",
+            "language model",
+            "foundation model",
+            "agentic",
+            "multi-agent",
+            "multi agent",
+            "智能体",
+            "多智能体",
+            "大模型",
+            "模型",
+            "推理",
+            "机器学习",
+        )
+        h = f" {hay} "
+        return any(t in h for t in ai_terms)
+
+    def _is_agent_like_keyword(ks: list[str]) -> bool:
+        for k in ks:
+            kk = (k or "").strip().lower()
+            if not kk:
+                continue
+            if kk in ("agent", "agents", "智能体", "多智能体"):
+                return True
+            if "multi-agent" in kk or "multi agent" in kk:
+                return True
+        return False
+
+    if keywords and items and query_mode == "explicit":
+        agent_guard = _is_agent_like_keyword(keywords)
+        matched = []
+        for it in items:
+            hay = _intent_hay(it)
+            if not any(k in hay for k in keywords):
+                continue
+            if agent_guard and not _ai_context_ok(hay):
+                continue
+            matched.append(it)
         if not matched and gnews_key and bool(config.get("gnews_enabled", False)):
             emit_step(
                 config,
@@ -670,6 +829,15 @@ def collect_stage(config: dict[str, Any], trace: dict[str, Any], intent_plan: di
                 "warn",
                 extra={"keywords": keywords, "items_after": len(items)},
             )
+    elif keywords and items:
+        # Generic browse mode should preserve broad recall and avoid hard intent filtering.
+        emit_step(
+            config,
+            trace,
+            "collect_filter",
+            "ok",
+            extra={"mode": "generic_skip_strict_filter", "keywords": keywords[:8], "items_after": len(items)},
+        )
     emit_step(
         config,
         trace,
@@ -738,6 +906,10 @@ def intent_stage(config: dict[str, Any], trace: dict[str, Any], items: list[dict
             "ok",
             extra={"mode": "user_memory_boost", "items": before_r},
         )
+    source_cap = max(1, int(config.get("items_per_source_max", 1)))
+    if source_cap > 0 and items:
+        items = cap_items_per_source(items, max_per_source=source_cap)
+        emit_step(config, trace, "source_cap", "ok", extra={"max_per_source": source_cap, "items_after": len(items)})
     final_cap = resolve_final_items_total(config)
     if len(items) > final_cap:
         items = items[:final_cap]

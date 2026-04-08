@@ -192,6 +192,7 @@ def _step_label(name: str) -> str:
         "fetch_article_body": "抓取原文链接正文（trafilatura）",
         "collect_filter": "按意图过滤抓取结果",
         "intent_rank": "按用户意图匹配并重排资讯（泛化浏览时可用用户记忆加权）",
+        "source_cap": "按信源截断（每信源最多固定条数）",
         "official_backfill": "补充官方发布资讯",
         "balance_items": "去重、分组并做重要性排序",
         "openclaw": "抓取 OpenClaw 热榜",
@@ -311,7 +312,7 @@ with st.sidebar:
             )
             ark_api_key = st.text_input(
                 "ARK_API_KEY",
-                value="",
+                value=(st.session_state.get("ARK_API_KEY") or os.getenv("ARK_API_KEY", "")),
                 type="password",
                 help="留空则使用 .env 中已加载的值；仅在需临时覆盖时填写",
             )
@@ -326,7 +327,7 @@ with st.sidebar:
             )
             openai_api_key = st.text_input(
                 "OPENAI_API_KEY",
-                value="",
+                value=(st.session_state.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY", "")),
                 type="password",
                 help="留空则使用 .env 中已加载的值",
             )
@@ -341,7 +342,7 @@ with st.sidebar:
         )
         gnews_api_key = st.text_input(
             "GNEWS_API_KEY（留空则用 .env）",
-            value="",
+            value=(st.session_state.get("GNEWS_API_KEY") or os.getenv("GNEWS_API_KEY", "")),
             type="password",
         )
         gnews_lang = st.selectbox("GNews 语言", ["en", "zh"], index=0)
@@ -500,6 +501,7 @@ if user_text:
         "allow_os_public_api_feeds": bool(_show_public_feeds),
         "public_api_feed_max": int(public_api_feed_max),
         "items_per_category_max": int(items_cap),
+        "items_per_source_max": 1,
         "final_items_total": 10,
         # I/O 并行（见 run_daily_digest / agent_runtime）；也可用环境变量覆盖
         "collect_news_max_workers": int(os.getenv("COLLECT_NEWS_MAX_WORKERS", "12")),

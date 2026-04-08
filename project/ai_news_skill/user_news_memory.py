@@ -138,6 +138,12 @@ _EXPLICIT_ACTION_HINTS = (
 )
 
 _EXPLICIT_TOPIC_HINTS = (
+    "agent",
+    "agents",
+    "multi-agent",
+    "multi agent",
+    "智能体",
+    "多智能体",
     "harness",
     "engineering",
     "arxiv",
@@ -242,9 +248,10 @@ def _llm_classify_query_mode(intent_text: str, config: dict[str, Any]) -> str | 
         "分类定义：\n"
         "1) generic：泛化浏览，用户想“随便看看最近新闻/资讯/动态”，不限定具体主题词。\n"
         "2) explicit：显式主题检索，用户明确指定了主题/对象/术语并希望按该主题查找。\n"
-        "判定规则：\n"
-        "- “随便查下 / 随便看下 / 看看最近新闻”属于 generic。\n"
-        "- “查下 harness engineering / 搜 openai api 更新”属于 explicit。\n"
+        "判定规则可以参考：\n"
+        "- “随便查下 / 随便看下 / 看看最近新闻”这类没有明确主题词和查询关键词的属于 generic。\n"
+        "- 仅有动作词而无主题词（如“查”“搜一下”“看下”）属于 generic。\n"
+        "- “查下 harness engineering / 搜 openai api 更新”这种有明确主题词和查询关键词的（比如“harness engineering”但不局限于这个词）属于 explicit。\n"
         "输出必须是 JSON：{\"mode\":\"generic|explicit\",\"confidence\":0-1,\"reason\":\"简短中文\"}"
     )
     user_prompt = f"用户输入：{intent_text}"
@@ -278,24 +285,25 @@ def _llm_classify_query_mode(intent_text: str, config: dict[str, Any]) -> str | 
 def resolve_query_mode(intent_text: str, config: dict[str, Any]) -> str:
     """
     Query mode resolution strategy:
-    1) lexical/regex baseline (cheap, deterministic)
-    2) LLM refinement when enabled + key available
-    3) fallback to baseline
+    1) LLM-first when enabled + key available
+    2) lexical/regex baseline fallback (deterministic)
     """
     base = classify_query_mode(intent_text)
     if not (intent_text or "").strip():
         return base
+    # Hard explicit: action + explicit topic should not be relaxed to generic by LLM.
+    if _contains_any(intent_text, _EXPLICIT_ACTION_HINTS) and _contains_any(intent_text, _EXPLICIT_TOPIC_HINTS):
+        return "explicit"
     use_llm = (os.getenv("QUERY_MODE_USE_LLM", "true") or "true").strip().lower() not in (
         "0",
         "false",
         "no",
         "off",
     )
-    if not use_llm:
-        return base
-    llm_mode = _llm_classify_query_mode(intent_text, config)
-    if llm_mode in ("generic", "explicit"):
-        return llm_mode
+    if use_llm:
+        llm_mode = _llm_classify_query_mode(intent_text, config)
+        if llm_mode in ("generic", "explicit"):
+            return llm_mode
     return base
 
 

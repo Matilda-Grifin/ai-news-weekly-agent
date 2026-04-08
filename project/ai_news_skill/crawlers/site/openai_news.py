@@ -48,24 +48,26 @@ class OpenAINewsCrawler:
         cutoff = now_dt - timedelta(hours=max(1, window_hours))
 
         out: list[CrawledItem] = []
-        for href, list_title in link_rows:
+        for href, list_title, list_published in link_rows:
             if len(out) >= max(1, per_source):
                 break
             try:
                 lt = (list_title or "").strip()
                 # List page usually has the headline; detail URLs often hit Cloudflare in headless — skip browser when we already have a title.
                 if lt:
-                    item = {"title": lt[:300], "published": "", "summary": "", "content_excerpt": ""}
+                    item = {"title": lt[:300], "published": (list_published or "").strip(), "summary": "", "content_excerpt": ""}
                 else:
                     item = _fetch_detail(href, timeout_ms=12000)
                     if not item:
                         slug = href.rstrip("/").split("/")[-1].replace("-", " ").strip()
                         item = {
                             "title": (slug[:300] if slug else href)[:300],
-                            "published": "",
+                            "published": (list_published or "").strip(),
                             "summary": "",
                             "content_excerpt": "",
                         }
+                    elif not str(item.get("published", "")).strip() and list_published:
+                        item["published"] = (list_published or "").strip()
                 pub = _parse_dt(item.get("published", ""))
                 if pub and (pub < cutoff or pub > now_dt + timedelta(minutes=10)):
                     continue
@@ -85,8 +87,8 @@ class OpenAINewsCrawler:
         return out
 
 
-def _ingest_openai_list_from_soup(soup: BeautifulSoup, by_url: dict[str, str]) -> None:
-    def _push_href(raw: str, list_title: str = "") -> None:
+def _ingest_openai_list_from_soup(soup: BeautifulSoup, by_url: dict[str, dict[str, str]]) -> None:
+    def _push_href(raw: str, list_title: str = "", list_published: str = "") -> None:
         href = (raw or "").strip()
         if not href:
             return
@@ -98,26 +100,33 @@ def _ingest_openai_list_from_soup(soup: BeautifulSoup, by_url: dict[str, str]) -
         if not _is_openai_news_index_post(full):
             return
         t = (list_title or "").strip()
-        if full not in by_url or len(t) > len(by_url[full]):
-            by_url[full] = t
+        p = (list_published or "").strip()
+        if full not in by_url:
+            by_url[full] = {"title": t, "published": p}
+            return
+        if len(t) > len(by_url[full].get("title", "")):
+            by_url[full]["title"] = t
+        if p and not by_url[full].get("published"):
+            by_url[full]["published"] = p
 
     for a in soup.find_all("a", href=True):
         href = str(a.get("href") or "").strip()
         if "/index/" not in href and "openai.com/index/" not in href.lower():
             continue
         title_guess = strip_html(a.get_text(" ", strip=True))[:400]
-        _push_href(href, title_guess)
+        pub_guess = _extract_list_card_published(a)
+        _push_href(href, title_guess, pub_guess)
 
     if len(by_url) < 12:
         for a in soup.select("a[href^='https://openai.com/'], a[href^='https://www.openai.com/']"):
             href = _normalize_url((a.get("href") or "").strip())
             if _is_openai_news_index_post(href):
-                _push_href(href, "")
+                _push_href(href, "", "")
 
 
 def _collect_openai_news_links(
     url: str, *, target: int, timeout_ms: int, allow_insecure_fallback: bool = True
-) -> list[tuple[str, str]]:
+) -> list[tuple[str, str, str]]:
     html = _fetch_html_playwright_scroll(
         url,
         timeout_ms=timeout_ms,
@@ -125,7 +134,7 @@ def _collect_openai_news_links(
         scroll_pause_ms=650,
         click_load_more=True,
     )
-    by_url: dict[str, str] = {}
+    by_url: dict[str, dict[str, str]] = {}
     _ingest_openai_list_from_soup(BeautifulSoup(html or "", "html.parser"), by_url)
 
     if len(by_url) < 1:
@@ -156,12 +165,79 @@ def _collect_openai_news_links(
                 link = (item.findtext("link") or "").strip()
                 link = _normalize_url(link)
                 if title and _is_openai_news_index_post(link):
-                    by_url[link] = title
+                    pub = (item.findtext("pubDate") or item.findtext("{http://purl.org/dc/elements/1.1/}date") or "").strip()
+                    by_url[link] = {"title": title, "published": pub}
         except Exception:
             pass
 
-    pairs = list(by_url.items())
+    pairs = [
+        (u, (meta.get("title", "") or "").strip(), (meta.get("published", "") or "").strip())
+        for u, meta in by_url.items()
+    ]
     return pairs[: max(1, target)]
+
+
+def _extract_list_card_published(anchor: Any) -> str:
+    """Best-effort date extraction from OpenAI list cards (e.g. 'April 6, 2026')."""
+    # Prefer semantic time tag first.
+    cur = anchor
+    for _ in range(5):
+        if cur is None:
+            break
+        t = cur.select_one("time[datetime]")
+        if t and t.get("datetime"):
+            return str(t.get("datetime")).strip()
+        if t:
+            txt = strip_html(t.get_text(" ", strip=True)).strip()
+            if _looks_like_date_text(txt):
+                return txt
+        cur = getattr(cur, "parent", None)
+
+    # OpenAI cards commonly expose human date in "text-meta" class.
+    cur = anchor
+    for _ in range(5):
+        if cur is None:
+            break
+        for node in cur.select(".text-meta, p.text-meta, span.text-meta"):
+            txt = strip_html(node.get_text(" ", strip=True)).strip()
+            if _looks_like_date_text(txt):
+                return txt
+        cur = getattr(cur, "parent", None)
+
+    # Fallback: scan nearby text for a date-like fragment.
+    cur = anchor
+    for _ in range(4):
+        if cur is None:
+            break
+        block_text = strip_html(cur.get_text(" ", strip=True))
+        m = re.search(
+            r"\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|"
+            r"Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},\s+\d{4}\b",
+            block_text,
+            flags=re.I,
+        )
+        if m:
+            return m.group(0).strip()
+        cur = getattr(cur, "parent", None)
+    return ""
+
+
+def _looks_like_date_text(text: str) -> bool:
+    s = (text or "").strip()
+    if not s:
+        return False
+    if re.search(r"\b\d{4}-\d{2}-\d{2}\b", s):
+        return True
+    if re.search(r"\b\d{4}/\d{1,2}/\d{1,2}\b", s):
+        return True
+    if re.search(
+        r"\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|"
+        r"Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},\s+\d{4}\b",
+        s,
+        flags=re.I,
+    ):
+        return True
+    return False
 
 
 def _is_openai_news_index_post(url: str) -> bool:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import urlparse
 
@@ -44,7 +45,10 @@ class HuggingFaceBlogCrawler:
                 item = _fetch_detail(href, timeout_ms=30000)
                 if not item:
                     continue
-                pub = _parse_dt(item.get("published", ""))
+                raw_pub = str(item.get("published", "") or "").strip()
+                pub = _parse_dt(raw_pub)
+                if raw_pub and pub is None:
+                    continue
                 if pub and (pub < cutoff or pub > now_dt + timedelta(minutes=10)):
                     continue
                 out.append(
@@ -248,8 +252,24 @@ def _find_date_published_in_jsonld(data: Any) -> str:
 
 def _parse_dt(raw: str) -> datetime | None:
     text = (raw or "").strip()
+    text = re.sub(r"\s+", " ", text).strip(" ,.;")
     if not text:
         return None
+    m = re.search(
+        r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},\s+\d{4}\b",
+        text,
+        flags=re.I,
+    )
+    if m:
+        text = m.group(0)
+    try:
+        d0 = parsedate_to_datetime(text)
+        if d0 is not None:
+            if d0.tzinfo is None:
+                d0 = d0.replace(tzinfo=timezone.utc)
+            return d0.astimezone()
+    except Exception:
+        pass
     try:
         norm = text.replace("Z", "+00:00")
         d = datetime.fromisoformat(norm)
@@ -257,7 +277,14 @@ def _parse_dt(raw: str) -> datetime | None:
             d = d.replace(tzinfo=timezone.utc)
         return d.astimezone()
     except Exception:
-        return None
+        pass
+    for fmt in ("%B %d, %Y", "%b %d, %Y", "%Y-%m-%d"):
+        try:
+            d2 = datetime.strptime(text, fmt).replace(tzinfo=timezone.utc)
+            return d2.astimezone()
+        except Exception:
+            continue
+    return None
 
 
 def _fetch_html_playwright(url: str, *, timeout_ms: int) -> str | None:
