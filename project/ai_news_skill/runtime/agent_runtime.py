@@ -1,12 +1,26 @@
 #!/usr/bin/env python3
 import json
+import logging
 import os
 import pathlib
 import re
 import time
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Any
+
+from chains.pre_enrich_reflection_chain import (
+    aggregate_pre_reflect_by_source,
+    build_pre_reflect_payload,
+    invoke_pre_enrich_reflection_chain,
+    pre_enrich_reflect_fetch_excerpts,
+    pre_enrich_reflection_toggle,
+    pre_reflect_partial_rss_toggle,
+    pre_reflect_report_dict,
+    reflection_item_min_score,
+    select_sources_for_partial_rss,
+)
 
 from ai_news_skill.user_news_memory import (
     attach_memory_to_config,
@@ -15,27 +29,20 @@ from ai_news_skill.user_news_memory import (
     merge_memory_keywords,
     rerank_items_by_user_memory_boost,
 )
-from run_daily_digest import (
-    attach_content_excerpts_to_items,
-    balance_items,
-    cap_items_per_category,
-    cap_items_per_source,
-    cap_papers_by_ratio,
-    collect_news,
-    dedupe_items,
-    extract_intent_keywords,
-    enrich_items_with_llm,
-    fetch_gnews_articles,
-    fetch_gnews_for_pipeline,
-    fetch_openclaw_stars_top,
-    infer_gnews_search_query,
-    llm_extract_intent_search_queries,
-    load_sources,
-    now_local,
-    render_markdown,
-    resolve_llm_runtime,
-    write_doc,
-)
+
+# Pipeline and HTTP functions now imported from modular locations
+from ai_news_skill.pipeline.dedup import dedupe_items, cap_items_per_category, cap_items_per_source, cap_papers_by_ratio, balance_items
+from ai_news_skill.pipeline.intent import extract_intent_keywords
+from ai_news_skill.pipeline.rss import collect_news, load_sources
+from ai_news_skill.pipeline.gnews import fetch_gnews_articles, fetch_gnews_for_pipeline, infer_gnews_search_query
+from ai_news_skill.pipeline.openclaw import fetch_openclaw_stars_top
+from ai_news_skill.pipeline.enrich import enrich_items_with_llm
+from ai_news_skill.pipeline.llm_client import llm_extract_intent_search_queries, resolve_llm_runtime
+from ai_news_skill.pipeline.markdown_writer import render_markdown, write_doc
+from ai_news_skill.pipeline.utils import now_local
+from ai_news_skill.pipeline.content import attach_content_excerpts_to_items
+
+_LOG = logging.getLogger(__name__)
 
 
 def resolve_strict_intent_match(config: dict[str, Any]) -> bool:
@@ -95,6 +102,8 @@ def init_run_context(config: dict[str, Any]) -> dict[str, Any]:
     run_id = _safe_name(started)
     run_dir = ensure_dir(runs_dir / run_id)
     trace_file = run_dir / "trace.json"
+    events_file = run_dir / "events.jsonl"
+    events_file_global = runs_dir / "events.jsonl"
     trace: dict[str, Any] = {
         "run_id": run_id,
         "started_at": started.isoformat(),
@@ -107,6 +116,8 @@ def init_run_context(config: dict[str, Any]) -> dict[str, Any]:
         "run_id": run_id,
         "run_dir": run_dir,
         "trace_file": trace_file,
+        "events_file": events_file,
+        "events_file_global": events_file_global,
         "trace": trace,
     }
 
@@ -272,6 +283,30 @@ def emit_step(config: dict[str, Any], trace: dict[str, Any], name: str, status: 
             pass
 
 
+def emit_metric_event(config: dict[str, Any], trace: dict[str, Any], event: str, payload: dict[str, Any] | None = None) -> None:
+    """
+    Canonical analytics events for SLA / eval metrics.
+    Writes JSONL to both run-local and global files under runs/.
+    """
+    rec = {
+        "event": event,
+        "ts": datetime.now().astimezone().isoformat(),
+        "run_id": trace.get("run_id", ""),
+    }
+    if payload:
+        rec.update(payload)
+    for key in ("_events_file", "_events_file_global"):
+        p = config.get(key)
+        if not p:
+            continue
+        try:
+            with pathlib.Path(str(p)).open("a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        except Exception:
+            # Metrics must not break the pipeline.
+            pass
+
+
 def intent_plan_stage(config: dict[str, Any], trace: dict[str, Any]) -> dict[str, Any]:
     intent_text = str(config.get("intent_text", "")).strip()
     aug = str(config.get("_user_memory_intent_augment", "")).strip()
@@ -394,6 +429,7 @@ def collect_stage(config: dict[str, Any], trace: dict[str, Any], intent_plan: di
             def _run_site_crawl(job: tuple[str, Any]) -> tuple[list[dict], str | None, str]:
                 """Returns (items_chunk, error_message_or_none, source_name_for_rss_skip)."""
                 src_name, c = job
+                emit_metric_event(config, trace, "source_attempt", {"source": src_name, "channel": "site_crawler"})
                 emit_step(config, trace, "site_crawl", "started", src_name[:120])
                 _t_sc = time.perf_counter()
                 try:
@@ -430,6 +466,17 @@ def collect_stage(config: dict[str, Any], trace: dict[str, Any], intent_plan: di
                         f"{c.name}: {type(ex).__name__}"[:200],
                         extra={"duration_ms": int((time.perf_counter() - _t_sc) * 1000)},
                     )
+                    emit_metric_event(
+                        config,
+                        trace,
+                        "source_result",
+                        {
+                            "source": src_name,
+                            "channel": "site_crawler",
+                            "status": "failed",
+                            "latency_ms": int((time.perf_counter() - _t_sc) * 1000),
+                        },
+                    )
                     return [], f"SiteCrawler({c.name}): {type(ex).__name__} {str(ex)[:120]}", src_name
                 chunk: list[dict] = []
                 for it in got or []:
@@ -452,6 +499,29 @@ def collect_stage(config: dict[str, Any], trace: dict[str, Any], intent_plan: di
                         "source": c.name,
                         "items": len(got or []),
                         "duration_ms": int((time.perf_counter() - _t_sc) * 1000),
+                    },
+                )
+                emit_metric_event(
+                    config,
+                    trace,
+                    "source_result",
+                    {
+                        "source": src_name,
+                        "channel": "site_crawler",
+                        "status": "ok",
+                        "items": len(got or []),
+                        "latency_ms": int((time.perf_counter() - _t_sc) * 1000),
+                    },
+                )
+                emit_metric_event(
+                    config,
+                    trace,
+                    "parse_result",
+                    {
+                        "source": src_name,
+                        "channel": "site_crawler",
+                        "parse_ok": True,
+                        "record_count": len(got or []),
                     },
                 )
                 return chunk, None, src_name
@@ -482,6 +552,7 @@ def collect_stage(config: dict[str, Any], trace: dict[str, Any], intent_plan: di
     rss_sources = [s for s in planned_sources if str(s.get("name", "")) not in site_crawled_source_names]
 
     def _on_rss_source(name: str, elapsed: float, n_items: int, src_errs: list[str]) -> None:
+        emit_metric_event(config, trace, "source_attempt", {"source": name, "channel": "rss"})
         emit_step(
             config,
             trace,
@@ -494,6 +565,29 @@ def collect_stage(config: dict[str, Any], trace: dict[str, Any], intent_plan: di
                 "items": n_items,
                 "ok": not src_errs,
                 "error_preview": (src_errs[0][:400] if src_errs else ""),
+            },
+        )
+        emit_metric_event(
+            config,
+            trace,
+            "source_result",
+            {
+                "source": name,
+                "channel": "rss",
+                "status": "ok" if not src_errs else "failed",
+                "items": n_items,
+                "latency_ms": int(round(elapsed * 1000)),
+            },
+        )
+        emit_metric_event(
+            config,
+            trace,
+            "parse_result",
+            {
+                "source": name,
+                "channel": "rss",
+                "parse_ok": not src_errs,
+                "record_count": n_items,
             },
         )
 
@@ -520,6 +614,15 @@ def collect_stage(config: dict[str, Any], trace: dict[str, Any], intent_plan: di
         },
     )
     items = dedupe_items(list(site_items) + list(rss_items))
+    emit_metric_event(
+        config,
+        trace,
+        "dedup_result",
+        {
+            "raw_count": len(list(site_items) + list(rss_items)),
+            "unique_count": len(items),
+        },
+    )
     gnews_key = (
         str(config.get("gnews_api_key", "")).strip() or os.getenv("GNEWS_API_KEY", "").strip()
     )
@@ -959,7 +1062,224 @@ def openclaw_stage(config: dict[str, Any], trace: dict[str, Any], errors: list[s
     return openclaw_top, openclaw_focus, openclaw_asof, errors
 
 
-def enrich_stage(config: dict[str, Any], trace: dict[str, Any], items: list[dict], errors: list[str]) -> tuple[str, list[str], list[str], list[str], list[str]]:
+def _partial_rss_recollection(
+    config: dict[str, Any],
+    trace: dict[str, Any],
+    all_sources: list[dict[str, Any]],
+    source_names: list[str],
+) -> tuple[list[dict], list[str]]:
+    """仅对指定信源名再跑 RSS（加宽时间窗、略增条数），不整轮重跑 collect。"""
+    if not source_names:
+        return [], []
+    name_set = {n.strip() for n in source_names if (n or "").strip()}
+    subset = [s for s in all_sources if str(s.get("name", "")).strip() in name_set]
+    if not subset:
+        _LOG.info("pre_reflect_partial_rss: no matching entries in sources.json for %s", name_set)
+        return [], []
+    try:
+        mult = int(os.getenv("PRE_REFLECT_PARTIAL_WINDOW_MULT", "2"))
+    except ValueError:
+        mult = 2
+    try:
+        extra_n = int(os.getenv("PRE_REFLECT_PARTIAL_EXTRA_PER_SOURCE", "2"))
+    except ValueError:
+        extra_n = 2
+    base_limit = max(1, int(config.get("limit", 5)))
+    per_source = max(1, min(10, base_limit + extra_n))
+    window_h = max(1, int(config.get("window_hours", 168)))
+    window_h = min(24 * 45, window_h * max(1, mult))
+    emit_step(
+        config,
+        trace,
+        "pre_reflect_partial_rss",
+        "started",
+        f"n={len(subset)} window_h={window_h} per_source={per_source}",
+    )
+    _t0 = time.perf_counter()
+    items, errs = collect_news(
+        sources=subset,
+        per_source=per_source,
+        allow_insecure_fallback=bool(config.get("allow_insecure_ssl", False)),
+        window_hours=window_h,
+        max_parallel=_worker_cap(config, "collect_news_max_workers", 12, "COLLECT_NEWS_MAX_WORKERS"),
+    )
+    emit_step(
+        config,
+        trace,
+        "pre_reflect_partial_rss",
+        "ok",
+        extra={
+            "items": len(items),
+            "errs": len(errs),
+            "duration_ms": int((time.perf_counter() - _t0) * 1000),
+        },
+    )
+    for e in errs[:8]:
+        _LOG.warning("pre_reflect_partial_rss: %s", e[:400])
+    return items, errs
+
+
+def pre_enrich_reflect_stage(
+    config: dict[str, Any],
+    trace: dict[str, Any],
+    items: list[dict],
+    *,
+    sources: list[dict[str, Any]],
+    intent_plan: dict[str, Any] | None,
+    min_official_items: int,
+) -> list[dict]:
+    """
+    Collect 完成后、Enrich 前：可选 LLM 评估原始条目。
+    - 结果进 trace + 日志，不进周报、不进 errors。
+    - 按条剔除极低分；按信源聚合后，仅对选定信源做 **局部 RSS 补拉**（加宽窗口），避免整图重跑 collect 仍得到同一批数据。
+    - 最后对合并结果再跑 intent_stage 做配比截断。
+    """
+    _ = intent_plan
+    if not pre_enrich_reflection_toggle(config):
+        return items
+    if not items:
+        return items
+    allow_cb = bool(config.get("allow_insecure_ssl", False))
+    if pre_enrich_reflect_fetch_excerpts():
+        emit_step(config, trace, "pre_enrich_reflection_excerpt_fetch", "started", "optional fetch for review")
+        _t_ex = time.perf_counter()
+        attach_content_excerpts_to_items(
+            items,
+            allow_cb,
+            max_parallel=_worker_cap(config, "excerpt_fetch_max_workers", 12, "EXCERPT_FETCH_MAX_WORKERS"),
+        )
+        emit_step(
+            config,
+            trace,
+            "pre_enrich_reflection_excerpt_fetch",
+            "ok",
+            extra={"duration_ms": int((time.perf_counter() - _t_ex) * 1000)},
+        )
+    emit_step(config, trace, "pre_enrich_reflection", "started", f"items={len(items)}")
+    _t = time.perf_counter()
+    try:
+        runtime_config = _build_runtime_namespace(config)
+        _provider, base_url, api_key = resolve_llm_runtime(runtime_config)
+        if not (api_key or "").strip():
+            _LOG.info("pre_enrich_reflection skipped: no LLM API key")
+            emit_step(
+                config,
+                trace,
+                "pre_enrich_reflection",
+                "warn",
+                "missing api key",
+                extra={"duration_ms": int((time.perf_counter() - _t) * 1000)},
+            )
+            return items
+        model = _llm_model_from_config(config)
+        payload = build_pre_reflect_payload(items, digest_date=now_local().strftime("%Y-%m-%d"))
+        out = invoke_pre_enrich_reflection_chain(
+            payload=payload,
+            api_key=api_key.strip(),
+            model=model,
+            base_url=base_url,
+            allow_insecure_fallback=allow_cb,
+            item_count=len(items),
+        )
+        if not out:
+            _LOG.warning("pre_enrich_reflection: empty model output")
+            emit_step(
+                config,
+                trace,
+                "pre_enrich_reflection",
+                "warn",
+                "empty output",
+                extra={"duration_ms": int((time.perf_counter() - _t) * 1000)},
+            )
+            return items
+        rep = pre_reflect_report_dict(out)
+        trace["pre_enrich_reflection"] = rep
+        ms = int((time.perf_counter() - _t) * 1000)
+        _LOG.info(
+            "pre_enrich_reflection ok overall_risk=%s batch_note=%s duration_ms=%s",
+            rep.get("overall_risk"),
+            (rep.get("batch_note") or "")[:120],
+            ms,
+        )
+        emit_step(
+            config,
+            trace,
+            "pre_enrich_reflection",
+            "ok",
+            extra={"overall_risk": rep.get("overall_risk"), "duration_ms": ms},
+        )
+
+        rows: list[dict[str, Any]] = list(rep.get("items") or [])
+        try:
+            drop_below = float(os.getenv("PRE_REFLECT_DROP_ITEM_MIN", "2"))
+        except ValueError:
+            drop_below = 2.0
+        row_by_idx: dict[int, dict[str, Any]] = {}
+        for r in rows:
+            try:
+                ix = int(r.get("idx") or 0)
+            except (TypeError, ValueError):
+                continue
+            if ix >= 1:
+                row_by_idx[ix] = r
+
+        rollup = aggregate_pre_reflect_by_source(items, rows)
+        trace["pre_enrich_reflection_by_source"] = rollup
+
+        per_source_total: dict[str, int] = defaultdict(int)
+        per_source_kept: dict[str, int] = defaultdict(int)
+        kept: list[dict] = []
+        for i, it in enumerate(items, 1):
+            src = str(it.get("source") or "未知信源")
+            per_source_total[src] += 1
+            row = row_by_idx.get(i)
+            if row is not None and reflection_item_min_score(row) < drop_below:
+                continue
+            per_source_kept[src] += 1
+            kept.append(it)
+
+        sources_with_no_items_left = {s for s, n in per_source_total.items() if per_source_kept.get(s, 0) == 0}
+        retry_list = select_sources_for_partial_rss(rollup, sources_with_no_items_left, config)
+        trace["pre_enrich_reflection_partial_plan"] = {
+            "dropped_items": len(items) - len(kept),
+            "sources_no_items_left": sorted(sources_with_no_items_left),
+            "partial_retry_sources": retry_list,
+        }
+
+        merged: list[dict]
+        if pre_reflect_partial_rss_toggle(config) and retry_list and sources:
+            extra, _rss_errs = _partial_rss_recollection(config, trace, sources, retry_list)
+            merged = dedupe_items(list(kept) + list(extra))
+            _LOG.info(
+                "pre_reflect: dropped_low=%d partial_sources=%s new_rss=%d merged=%d",
+                len(items) - len(kept),
+                retry_list,
+                len(extra),
+                len(merged),
+            )
+        else:
+            merged = kept
+            if retry_list and not pre_reflect_partial_rss_toggle(config):
+                trace["pre_enrich_reflection_partial_skipped"] = "partial_rss_disabled"
+
+        merged, _ = intent_stage(config, trace, merged, min_official_items)
+        return merged
+    except Exception as ex:  # noqa: BLE001
+        _LOG.warning("pre_enrich_reflection failed: %s", ex, exc_info=True)
+        emit_step(
+            config,
+            trace,
+            "pre_enrich_reflection",
+            "warn",
+            f"{type(ex).__name__}: {ex}",
+            extra={"duration_ms": int((time.perf_counter() - _t) * 1000)},
+        )
+        return items
+
+
+def enrich_stage(
+    config: dict[str, Any], trace: dict[str, Any], items: list[dict], errors: list[str]
+) -> tuple[str, list[str], list[str], list[str], list[str]]:
     llm_overview = ""
     llm_core_points: list[str] = []
     llm_values: list[str] = []
@@ -1128,12 +1448,25 @@ def run_digest_pipeline(config: dict[str, Any]) -> dict[str, Any]:
     output_dir = ctx["output_dir"]
     run_id = str(ctx["run_id"])
     run_dir = str(ctx["run_dir"])
+    config["_events_file"] = str(ctx["events_file"])
+    config["_events_file_global"] = str(ctx["events_file_global"])
+    emit_metric_event(config, trace, "task_started", {"intent": str(config.get("intent_text", ""))[:500]})
     try:
         plan = intent_plan_stage(config, trace)
-        _, items, errors, min_official_items = collect_stage(config, trace, intent_plan=plan)
+        sources, items, errors, min_official_items = collect_stage(config, trace, intent_plan=plan)
         items, _ = intent_stage(config, trace, items, min_official_items)
         openclaw_top, openclaw_focus, openclaw_asof, errors = openclaw_stage(config, trace, errors)
-        llm_overview, llm_core_points, llm_values, llm_titles_cn, errors = enrich_stage(config, trace, items, errors)
+        items = pre_enrich_reflect_stage(
+            config,
+            trace,
+            items,
+            sources=sources,
+            intent_plan=plan,
+            min_official_items=min_official_items,
+        )
+        llm_overview, llm_core_points, llm_values, llm_titles_cn, errors = enrich_stage(
+            config, trace, items, errors
+        )
         doc_path = write_stage(
             config=config,
             trace=trace,
@@ -1156,9 +1489,35 @@ def run_digest_pipeline(config: dict[str, Any]) -> dict[str, Any]:
             "trace_file": str(trace_file),
             "run_id": run_id,
         }
+        final_status = "SUCCESS_WITH_NEWS" if len(items) > 0 else "SUCCESS_NO_NEWS"
+        emit_metric_event(
+            config,
+            trace,
+            "task_finished",
+            {
+                "final_status": final_status,
+                "news_count": len(items),
+                "error_count": len(errors),
+                "latency_ms": int((datetime.now().astimezone() - started).total_seconds() * 1000),
+                "trace_file": str(trace_file),
+            },
+        )
         finalize_ok(trace, trace_file, started, result)
         return result
     except Exception as ex:  # noqa: BLE001
+        emit_metric_event(
+            config,
+            trace,
+            "task_finished",
+            {
+                "final_status": "FAILED",
+                "news_count": 0,
+                "error_count": 1,
+                "latency_ms": int((datetime.now().astimezone() - started).total_seconds() * 1000),
+                "error": f"{type(ex).__name__}: {ex}"[:500],
+                "trace_file": str(trace_file),
+            },
+        )
         finalize_failed(trace, trace_file, started, f"{type(ex).__name__}: {ex}")
         raise
 

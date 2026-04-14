@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+# 这个文件是项目里 LangGraph 编排的核心：
+# - 定义状态结构 DigestState（图里每个节点都读写这份状态）
+# - 定义各阶段节点（collect/enrich/write 等）
+# - 定义条件边（成功走下一步，失败走重试或持久化）
+# - 暴露 run_with_graph 作为统一执行入口
+
 import pathlib
 import time
 from typing import Any, TypedDict
@@ -18,6 +24,7 @@ from ai_news_skill.runtime.agent_runtime import (
     intent_plan_stage,
     intent_stage,
     openclaw_stage,
+    pre_enrich_reflect_stage,
     write_stage,
 )
 
@@ -26,11 +33,14 @@ from digest_tools import DIGEST_AGENT_TOOLS
 
 
 class DigestState(TypedDict, total=False):
+    # 运行配置与重试控制
     config: dict[str, Any]
     attempt: int
     max_retries: int
+    # 输出结果与错误信息
     result: dict[str, Any]
     error: str
+    # 运行时元信息（用于 trace、输出目录、run_id）
     started_iso: str
     started_obj: Any
     trace: dict[str, Any]
@@ -49,6 +59,7 @@ class DigestState(TypedDict, total=False):
     llm_core_points: list[str]
     llm_values: list[str]
     llm_titles_cn: list[str]
+    # 意图规划阶段产物：用于后续采集和筛选的策略
     intent_plan: dict[str, Any]
 
 
@@ -68,6 +79,7 @@ def save_run_record_tool(record: dict[str, Any]) -> dict[str, Any]:
 
 
 def _bootstrap_node(state: DigestState) -> DigestState:
+    # 幂等初始化：如果已有 trace，说明已初始化过，直接返回
     if state.get("trace"):
         return state
     config = state.get("config", {})
@@ -76,6 +88,7 @@ def _bootstrap_node(state: DigestState) -> DigestState:
         attach_memory_to_config(config, src_p.parent)
     except Exception:
         pass
+    # 初始化一次运行上下文（trace 文件、输出目录、run_id 等）
     ctx = init_run_context(config)
     state["started_obj"] = ctx["started"]
     state["started_iso"] = ctx["started"].isoformat()
@@ -97,16 +110,19 @@ def _bootstrap_node(state: DigestState) -> DigestState:
 
 
 def _collect_node(state: DigestState) -> DigestState:
+    # 采集节点：做数据抓取 + 意图筛选 + OpenClaw 补充 + 反思预处理
     config = state.get("config", {})
     trace = state.get("trace", {})
     attempt = int(state.get("attempt", 1))
     state.pop("error", None)
     try:
+        # 1) 采集多源新闻
         sources, items, errors, min_official_items = collect_stage(
             config,
             trace,
             intent_plan=state.get("intent_plan"),
         )
+        # 2) 基于 intent 进行内容筛选/排序
         items, _ = intent_stage(
             config=config,
             trace=trace,
@@ -117,6 +133,7 @@ def _collect_node(state: DigestState) -> DigestState:
         state["items"] = items
         state["errors"] = errors
         state["min_official_items"] = min_official_items
+        # 3) 拉取 OpenClaw 结果（热点与聚焦）
         top, focus, asof, errors_oc = openclaw_stage(
             config=config,
             trace=trace,
@@ -126,14 +143,25 @@ def _collect_node(state: DigestState) -> DigestState:
         state["openclaw_focus"] = focus
         state["openclaw_asof"] = asof
         state["errors"] = errors_oc
+        # 4) enrich 前反思，进一步修正待摘要内容
+        state["items"] = pre_enrich_reflect_stage(
+            config,
+            trace,
+            state["items"],
+            sources=state["sources"],
+            intent_plan=state.get("intent_plan"),
+            min_official_items=state["min_official_items"],
+        )
         return state
     except Exception as ex:  # noqa: BLE001
+        # 节点失败：记录错误并增加 attempt，交给条件边决定是否重试
         state["error"] = f"{type(ex).__name__}: {ex}"
         state["attempt"] = attempt + 1
         return state
 
 
 def _intent_node(state: DigestState) -> DigestState:
+    # 先做“意图规划”，产出后续采集的方向和优先级策略
     config = state.get("config", {})
     trace = state.get("trace", {})
     attempt = int(state.get("attempt", 1))
@@ -148,6 +176,7 @@ def _intent_node(state: DigestState) -> DigestState:
 
 
 def _enrich_node(state: DigestState) -> DigestState:
+    # 调用 LLM 做摘要增强：总览、要点、价值、中文标题
     config = state.get("config", {})
     trace = state.get("trace", {})
     attempt = int(state.get("attempt", 1))
@@ -172,6 +201,7 @@ def _enrich_node(state: DigestState) -> DigestState:
 
 
 def _write_node(state: DigestState) -> DigestState:
+    # 将整理后的结果写入 markdown 文档，并回填 result
     config = state.get("config", {})
     trace = state.get("trace", {})
     attempt = int(state.get("attempt", 1))
@@ -207,6 +237,10 @@ def _write_node(state: DigestState) -> DigestState:
 
 
 def _retry_or_next(state: DigestState, next_node: str) -> str:
+    # 通用路由规则：
+    # - 若当前有 error 且未超过重试次数 -> 回 collect 重试
+    # - 若当前有 error 且超过重试次数 -> 去 persist 落盘失败信息
+    # - 无 error -> 进入指定下一节点
     max_retries = int(state.get("max_retries", 2))
     if state.get("error") and int(state.get("attempt", 1)) <= max_retries:
         time.sleep(1.2)
@@ -235,6 +269,7 @@ def _after_write(state: DigestState) -> str:
 
 
 def _persist_node(state: DigestState) -> DigestState:
+    # 统一收尾节点：无论成功失败都在这里写 trace，并保存运行记录
     import pathlib
     from datetime import datetime
 
@@ -255,6 +290,9 @@ def _persist_node(state: DigestState) -> DigestState:
 
 
 def build_workflow():
+    # LangGraph 拓扑（主流程）：
+    # bootstrap -> intent -> collect -> enrich -> write -> persist -> END
+    # 其中 intent/collect/enrich 可能因错误回 collect 重试
     graph = StateGraph(DigestState)
     graph.add_node("bootstrap", _bootstrap_node)
     graph.add_node("collect", _collect_node)
@@ -273,6 +311,7 @@ def build_workflow():
 
 
 def run_with_graph(config: dict[str, Any], max_retries: int = 2) -> DigestState:
+    # 对外执行入口：构建图并 invoke 初始状态
     app = build_workflow()
     initial: DigestState = {"config": config, "attempt": 1, "max_retries": max_retries}
     return app.invoke(initial)

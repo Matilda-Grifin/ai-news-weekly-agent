@@ -2202,6 +2202,20 @@ def main() -> int:
         except Exception as ex:  # noqa: BLE001
             errors.append(f"OpenClaw热榜: {type(ex).__name__} {ex}")
 
+    try:
+        from ai_news_skill.runtime.agent_runtime import pre_enrich_reflect_stage
+
+        items = pre_enrich_reflect_stage(
+            {},
+            {},
+            items,
+            sources=sources,
+            intent_plan={},
+            min_official_items=max(0, args.min_official_items),
+        )
+    except Exception:
+        pass
+
     if args.use_llm:
         try:
             provider, base_url, api_key = resolve_llm_runtime(args)
