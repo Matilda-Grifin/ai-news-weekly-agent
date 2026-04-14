@@ -9,6 +9,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Any
+from urllib.parse import urlparse
 
 from chains.pre_enrich_reflection_chain import (
     aggregate_pre_reflect_by_source,
@@ -305,6 +306,87 @@ def emit_metric_event(config: dict[str, Any], trace: dict[str, Any], event: str,
         except Exception:
             # Metrics must not break the pipeline.
             pass
+
+
+def _resolve_threshold_float(config: dict[str, Any], key: str, default: float) -> float:
+    try:
+        return float(config.get(key, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _resolve_threshold_int(config: dict[str, Any], key: str, default: int) -> int:
+    try:
+        return int(config.get(key, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _evaluate_quality_gate(config: dict[str, Any], trace: dict[str, Any], items: list[dict], latency_ms: int) -> dict[str, Any]:
+    required_fields = ("title", "source", "published", "link", "summary")
+    total = len(items)
+    if total <= 0:
+        field_completeness = 0.0
+    else:
+        ok_cnt = 0
+        for it in items:
+            if all(str(it.get(k, "")).strip() for k in required_fields):
+                ok_cnt += 1
+        field_completeness = ok_cnt / total
+
+    dedup_raw = int(trace.get("dedup_raw_count", total))
+    dedup_unique = int(trace.get("dedup_unique_count", total))
+    if dedup_raw <= 0:
+        duplicate_ratio = 0.0
+    else:
+        keep_rate = dedup_unique / max(1, dedup_raw)
+        duplicate_ratio = max(0.0, 1.0 - keep_rate)
+
+    blocked = {str(x).strip().lower() for x in (config.get("blocked_domains") or []) if str(x).strip()}
+    compliance_violations: list[str] = []
+    for it in items:
+        link = str(it.get("link", "")).strip()
+        if not link:
+            continue
+        p = urlparse(link)
+        host = (p.netloc or "").lower()
+        if p.scheme and p.scheme != "https":
+            compliance_violations.append(f"insecure_scheme:{p.scheme}")
+        if host and host in blocked:
+            compliance_violations.append(f"blocked_domain:{host}")
+    compliance_violations = sorted(set(compliance_violations))
+
+    min_completeness = _resolve_threshold_float(config, "metric_min_field_completeness", 0.90)
+    max_duplicate_ratio = _resolve_threshold_float(config, "metric_max_duplicate_ratio", 0.10)
+    max_latency_ms = _resolve_threshold_int(config, "metric_max_latency_ms", 120000)
+    require_https = bool(config.get("metric_require_https", True))
+
+    pass_field_completeness = field_completeness >= min_completeness
+    pass_dedup = duplicate_ratio <= max_duplicate_ratio
+    pass_latency = latency_ms <= max_latency_ms
+    if require_https:
+        pass_compliance = len(compliance_violations) == 0
+    else:
+        pass_compliance = not any(v.startswith("blocked_domain:") for v in compliance_violations)
+
+    return {
+        "field_completeness": round(field_completeness, 4),
+        "duplicate_ratio": round(duplicate_ratio, 4),
+        "latency_ms": latency_ms,
+        "compliance_ok": pass_compliance,
+        "compliance_violations": compliance_violations,
+        "thresholds": {
+            "min_field_completeness": min_completeness,
+            "max_duplicate_ratio": max_duplicate_ratio,
+            "max_latency_ms": max_latency_ms,
+            "require_https": require_https,
+        },
+        "pass_field_completeness": pass_field_completeness,
+        "pass_dedup": pass_dedup,
+        "pass_latency": pass_latency,
+        "pass_compliance": pass_compliance,
+        "quality_passed": pass_field_completeness and pass_dedup and pass_latency and pass_compliance,
+    }
 
 
 def intent_plan_stage(config: dict[str, Any], trace: dict[str, Any]) -> dict[str, Any]:
@@ -623,6 +705,8 @@ def collect_stage(config: dict[str, Any], trace: dict[str, Any], intent_plan: di
             "unique_count": len(items),
         },
     )
+    trace["dedup_raw_count"] = len(list(site_items) + list(rss_items))
+    trace["dedup_unique_count"] = len(items)
     gnews_key = (
         str(config.get("gnews_api_key", "")).strip() or os.getenv("GNEWS_API_KEY", "").strip()
     )
@@ -1489,7 +1573,14 @@ def run_digest_pipeline(config: dict[str, Any]) -> dict[str, Any]:
             "trace_file": str(trace_file),
             "run_id": run_id,
         }
+        latency_ms = int((datetime.now().astimezone() - started).total_seconds() * 1000)
+        quality_gate = _evaluate_quality_gate(config, trace, items, latency_ms)
         final_status = "SUCCESS_WITH_NEWS" if len(items) > 0 else "SUCCESS_NO_NEWS"
+        is_effective_delivery = bool(
+            final_status == "SUCCESS_WITH_NEWS" and quality_gate.get("quality_passed", False)
+        )
+        result["quality_gate"] = quality_gate
+        result["is_effective_delivery"] = is_effective_delivery
         emit_metric_event(
             config,
             trace,
@@ -1498,8 +1589,13 @@ def run_digest_pipeline(config: dict[str, Any]) -> dict[str, Any]:
                 "final_status": final_status,
                 "news_count": len(items),
                 "error_count": len(errors),
-                "latency_ms": int((datetime.now().astimezone() - started).total_seconds() * 1000),
+                "latency_ms": latency_ms,
                 "trace_file": str(trace_file),
+                "is_effective_delivery": is_effective_delivery,
+                "field_completeness": quality_gate.get("field_completeness", 0.0),
+                "duplicate_ratio": quality_gate.get("duplicate_ratio", 0.0),
+                "compliance_ok": quality_gate.get("compliance_ok", True),
+                "quality_passed": quality_gate.get("quality_passed", False),
             },
         )
         finalize_ok(trace, trace_file, started, result)

@@ -169,6 +169,21 @@ Common parameters:
 - `--min-official-items 3`: minimum target count for official news
 - `--focus-skill "tavily"`: track ranking for a specific OpenClaw skill
 
+### View Daily Metrics
+
+Use the metrics script to quickly inspect delivery/failure/latency/source coverage:
+
+```bash
+python3 project/scripts/metrics_report.py
+```
+
+Common options:
+
+- `--date 2026-04-14`: query a specific day
+- `--show-runs`: include per-run details
+- `--json`: output JSON for dashboards or downstream processing
+- `--runs-dir /opt/ai-news/app/runs`: point to a custom runs directory
+
 ### Source Categories
 
 1. **Official Announcements**: OpenAI, Anthropic, Google AI, Meta AI, Microsoft AI official blogs

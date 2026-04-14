@@ -1,3 +1,39 @@
+#阿里云网址
+http://121.41.81.58:8081/
+
+#阿里云查指标命令
+快速看当天任务结果分层
+python - <<'PY'
+import json,datetime
+from collections import Counter
+today=datetime.datetime.now().date().isoformat()
+c=Counter()
+for line in open("runs/events.jsonl",encoding="utf-8"):
+    e=json.loads(line)
+    if e.get("event")=="task_finished" and str(e.get("ts","")).startswith(today):
+        c[e.get("final_status","UNKNOWN")]+=1
+print(dict(c))
+PY
+快速看当天 P50/P95
+python - <<'PY'
+import json,datetime,math
+today=datetime.datetime.now().date().isoformat()
+arr=[]
+for line in open("runs/events.jsonl",encoding="utf-8"):
+    e=json.loads(line)
+    if e.get("event")=="task_finished" and str(e.get("ts","")).startswith(today):
+        v=e.get("latency_ms")
+        if isinstance(v,(int,float)): arr.append(v)
+arr.sort()
+if not arr: print("no data"); raise SystemExit
+def pct(a,p):
+    i=max(0,min(len(a)-1,math.ceil(len(a)*p/100)-1))
+    return a[i]
+print({"count":len(arr),"p50_ms":pct(arr,50),"p95_ms":pct(arr,95)})
+PY
+你要的话我可以再给你加一个现成脚本（比如project/scripts/metrics_report.py），阿里云上直接 python ... --today 一键出报表。
+
+
 # 阿里云服务器部署指南（24/7 运行）
 
 本指南将 Streamlit 应用部署为阿里云 ECS 的长期后台服务。

@@ -60,6 +60,30 @@
 
 说明：`SUCCESS_NO_NEWS`不计入失败，但不计入“有效交付”。
 
+### 2.2 质量达标阈值（已落地到代码）
+
+当前默认阈值（可通过配置覆盖）：
+- 字段完整率：`Field Completeness >= 0.90`
+- 重复率：`Duplicate Ratio <= 0.10`
+- 时延：`latency_ms <= 120000`（120秒）
+- 合规：无违规（默认要求新闻链接为`https`，且不在`blocked_domains`黑名单）
+
+代码落地点：
+- `project/ai_news_skill/runtime/agent_runtime.py`
+- 任务结束事件`task_finished`会写入：
+  - `field_completeness`
+  - `duplicate_ratio`
+  - `compliance_ok`
+  - `quality_passed`
+  - `is_effective_delivery`
+
+可配置项（`config`）：
+- `metric_min_field_completeness`（默认`0.90`）
+- `metric_max_duplicate_ratio`（默认`0.10`）
+- `metric_max_latency_ms`（默认`120000`）
+- `metric_require_https`（默认`true`）
+- `blocked_domains`（默认空）
+
 ---
 
 ## 3. 指标与公式（可直接上看板）
