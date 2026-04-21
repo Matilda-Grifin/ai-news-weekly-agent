@@ -180,6 +180,45 @@ def _extract_focus_skill(user_text: str) -> str:
     return cleaned[:60]
 
 
+def _infer_query_mode(user_text: str) -> str:
+    text = (user_text or "").strip().lower()
+    if not text:
+        return "generic"
+    generic_tokens = ("随便", "看看", "查查", "逛逛", "any", "whatever", "anything")
+    if any(t in text for t in generic_tokens):
+        return "generic"
+    return "explicit"
+
+
+def _extract_trace_diagnostics(trace_file: str) -> dict:
+    out = {
+        "query_mode": "",
+        "intent_keywords": [],
+        "items_before": None,
+        "items_after": None,
+        "reason": "",
+    }
+    try:
+        p = pathlib.Path(trace_file)
+        if not p.exists():
+            return out
+        data = json.loads(p.read_text(encoding="utf-8"))
+        steps = data.get("steps") or []
+        for stp in steps:
+            if stp.get("name") == "intent_keywords" and stp.get("extra"):
+                extra = stp.get("extra") or {}
+                out["query_mode"] = str(extra.get("query_mode", "") or "")
+                out["intent_keywords"] = list(extra.get("intent_keywords") or [])[:12]
+            if stp.get("name") == "collect_filter" and stp.get("extra"):
+                extra = stp.get("extra") or {}
+                out["items_before"] = extra.get("items_before")
+                out["items_after"] = extra.get("items_after")
+                out["reason"] = str(extra.get("reason", "") or "")
+        return out
+    except Exception:
+        return out
+
+
 def _step_label(name: str) -> str:
     """与 agent_runtime.emit_step 的 name 对齐；未映射的步骤不展示内部英文名。"""
     mapping = {
@@ -469,6 +508,7 @@ if user_text:
         "min_official_items": 3,
         "focus_skill": _extract_focus_skill(user_text),
         "intent_text": user_text,
+        "_query_mode": _infer_query_mode(user_text),
         "enable_openclaw": any(key in user_text.lower() for key in ["openclaw", "topclaw", "技能榜", "榜单", "skill"]),
         "use_llm": use_llm,
         "llm_provider": llm_provider,
@@ -543,12 +583,22 @@ if user_text:
     if state.get("result"):
         result = state["result"]
         doc_path = pathlib.Path(result["doc_path"])
+        diag = _extract_trace_diagnostics(result.get("trace_file", ""))
         reply = (
             f"本次时间窗口：**{days} 天**（{window_hours} 小时）；"
             f"条数上限：每信源/板块 **{items_cap}**，GNews **2**。\n"
             f"最终报告固定输出上限：**10 条**。\n"
             f"已完成：共抓取 {result.get('items', 0)} 条。\n报告路径：`{doc_path}`"
         )
+        if diag.get("intent_keywords"):
+            reply += (
+                f"\n\n诊断信息：查询模式 **{diag.get('query_mode') or 'unknown'}**；"
+                f"意图关键词：`{', '.join(diag.get('intent_keywords') or [])}`。"
+            )
+        if diag.get("items_before") is not None:
+            reply += f"\n过滤前 {diag.get('items_before')} 条，过滤后 {diag.get('items_after')} 条。"
+        if diag.get("reason"):
+            reply += f"\n筛空原因：`{diag.get('reason')}`。"
         if doc_path.exists():
             md = doc_path.read_text(encoding="utf-8")
             preview = md

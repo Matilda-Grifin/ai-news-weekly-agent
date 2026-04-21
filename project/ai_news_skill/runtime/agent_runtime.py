@@ -463,6 +463,18 @@ def collect_stage(config: dict[str, Any], trace: dict[str, Any], intent_plan: di
         plan_kw = extract_intent_keywords(intent_text)
     query_mode = str(config.get("_query_mode", "explicit") or "explicit").strip().lower()
     mem_kw = [str(x).strip() for x in (config.get("_user_memory_extra_keywords") or []) if str(x).strip()]
+    emit_step(
+        config,
+        trace,
+        "intent_keywords",
+        "ok",
+        extra={
+            "query_mode": query_mode,
+            "intent_keywords": plan_kw[:12],
+            "memory_keywords": mem_kw[:12],
+            "intent_text_preview": intent_text[:120],
+        },
+    )
     prefer_categories = set(plan.get("prefer_categories", []) or [])
     prefer_source_kw = [str(x).lower() for x in (plan.get("prefer_source_name_keywords", []) or [])]
     if prefer_categories:
@@ -939,6 +951,7 @@ def collect_stage(config: dict[str, Any], trace: dict[str, Any], intent_plan: di
 
     if keywords and items and query_mode == "explicit":
         agent_guard = _is_agent_like_keyword(keywords)
+        items_before_filter = len(items)
         matched = []
         for it in items:
             hay = _intent_hay(it)
@@ -996,7 +1009,19 @@ def collect_stage(config: dict[str, Any], trace: dict[str, Any], intent_plan: di
         strict = resolve_strict_intent_match(config)
         if matched:
             items = matched
-            emit_step(config, trace, "collect_filter", "ok", extra={"keywords": keywords, "items_after": len(items)})
+            emit_step(
+                config,
+                trace,
+                "collect_filter",
+                "ok",
+                extra={
+                    "mode": "explicit",
+                    "keywords": keywords,
+                    "items_before": items_before_filter,
+                    "items_after": len(items),
+                    "matched_count": len(matched),
+                },
+            )
         elif strict:
             items = []
             errors = list(errors)
@@ -1023,6 +1048,20 @@ def collect_stage(config: dict[str, Any], trace: dict[str, Any], intent_plan: di
                 "warn",
                 extra={"keywords": keywords, "items_after": len(items)},
             )
+    elif keywords and not items:
+        emit_step(
+            config,
+            trace,
+            "collect_filter",
+            "warn",
+            extra={
+                "mode": query_mode,
+                "keywords": keywords[:12],
+                "items_before": 0,
+                "items_after": 0,
+                "reason": "no_candidates_before_filter",
+            },
+        )
     elif keywords and items:
         # Generic browse mode should preserve broad recall and avoid hard intent filtering.
         emit_step(
