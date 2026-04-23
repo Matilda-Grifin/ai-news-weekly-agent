@@ -5,13 +5,6 @@ import copy
 import json
 import pathlib
 from typing import Any
-
-try:
-    from langchain.agents import AgentExecutor, create_tool_calling_agent
-except ImportError:
-    # LangChain API changed across versions; keep compatibility with older/newer layouts.
-    from langchain.agents.agent import AgentExecutor  # type: ignore
-    from langchain.agents.tool_calling_agent.base import create_tool_calling_agent  # type: ignore
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.tools import tool
 
@@ -69,7 +62,9 @@ def _build_executor(
     tools: list[Any],
     sys0: str,
     user_intent: str,
-) -> AgentExecutor:
+) -> Any:
+    from langchain.agents import AgentExecutor, create_tool_calling_agent
+
     prompt = ChatPromptTemplate.from_messages(
         [
             ("system", sys0),
