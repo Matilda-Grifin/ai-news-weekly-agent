@@ -105,6 +105,8 @@ def init_run_context(config: dict[str, Any]) -> dict[str, Any]:
     trace_file = run_dir / "trace.json"
     events_file = run_dir / "events.jsonl"
     events_file_global = runs_dir / "events.jsonl"
+    source_items_file = run_dir / "source_items.jsonl"
+    source_items_file_global = runs_dir / "source_items.jsonl"
     trace: dict[str, Any] = {
         "run_id": run_id,
         "started_at": started.isoformat(),
@@ -119,6 +121,8 @@ def init_run_context(config: dict[str, Any]) -> dict[str, Any]:
         "trace_file": trace_file,
         "events_file": events_file,
         "events_file_global": events_file_global,
+        "source_items_file": source_items_file,
+        "source_items_file_global": source_items_file_global,
         "trace": trace,
     }
 
@@ -362,6 +366,42 @@ def emit_metric_event(config: dict[str, Any], trace: dict[str, Any], event: str,
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
         except Exception:
             # Metrics must not break the pipeline.
+            pass
+
+
+def emit_source_items(config: dict[str, Any], trace: dict[str, Any], channel: str, items: list[dict[str, Any]]) -> None:
+    """
+    Persist per-source collected content for debugging/auditing.
+    Writes JSONL to both run-local and global source_items files.
+    """
+    if not items:
+        return
+    ts = datetime.now().astimezone().isoformat()
+    run_id = str(trace.get("run_id", ""))
+    records: list[str] = []
+    for it in items:
+        rec = {
+            "event": "source_item",
+            "ts": ts,
+            "run_id": run_id,
+            "channel": channel,
+            "source": str(it.get("source", "")).strip(),
+            "category": str(it.get("category", "")).strip(),
+            "title": str(it.get("title", "")).strip(),
+            "link": str(it.get("link", "")).strip(),
+            "published": str(it.get("published", "")).strip(),
+            "summary": str(it.get("summary", "")).strip()[:3000],
+            "content_excerpt": str(it.get("content_excerpt", "")).strip()[:4000],
+        }
+        records.append(json.dumps(rec, ensure_ascii=False))
+    for key in ("_source_items_file", "_source_items_file_global"):
+        p = config.get(key)
+        if not p:
+            continue
+        try:
+            with pathlib.Path(str(p)).open("a", encoding="utf-8") as f:
+                f.write("\n".join(records) + "\n")
+        except Exception:
             pass
 
 
@@ -757,6 +797,8 @@ def collect_stage(config: dict[str, Any], trace: dict[str, Any], intent_plan: di
         rss_source_hook=_on_rss_source,
     )
     errors.extend(rss_errors)
+    emit_source_items(config, trace, "site_crawler", site_items)
+    emit_source_items(config, trace, "rss", rss_items)
     emit_step(
         config,
         trace,
@@ -848,6 +890,7 @@ def collect_stage(config: dict[str, Any], trace: dict[str, Any], intent_plan: di
                     extra={"duration_ms": int((time.perf_counter() - _t_gnews) * 1000)},
                 )
             else:
+                emit_source_items(config, trace, "gnews", merged_g)
                 emit_step(
                     config,
                     trace,
@@ -912,6 +955,7 @@ def collect_stage(config: dict[str, Any], trace: dict[str, Any], intent_plan: di
                 )
             else:
                 items = dedupe_items(gitems + items)
+                emit_source_items(config, trace, "gnews", gitems)
                 emit_step(
                     config,
                     trace,
@@ -951,6 +995,7 @@ def collect_stage(config: dict[str, Any], trace: dict[str, Any], intent_plan: di
                 emit_step(config, trace, "public_api_feeds", "warn", "; ".join(api_errs)[:200])
             if api_extra:
                 items = dedupe_items(api_extra + items)
+                emit_source_items(config, trace, "public_api_feeds", api_extra)
                 emit_step(
                     config,
                     trace,
@@ -1636,6 +1681,8 @@ def run_digest_pipeline(config: dict[str, Any]) -> dict[str, Any]:
     run_dir = str(ctx["run_dir"])
     config["_events_file"] = str(ctx["events_file"])
     config["_events_file_global"] = str(ctx["events_file_global"])
+    config["_source_items_file"] = str(ctx["source_items_file"])
+    config["_source_items_file_global"] = str(ctx["source_items_file_global"])
     emit_metric_event(config, trace, "task_started", {"intent": str(config.get("intent_text", ""))[:500]})
     try:
         plan = intent_plan_stage(config, trace)
