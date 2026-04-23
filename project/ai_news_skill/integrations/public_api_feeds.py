@@ -34,14 +34,14 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import timedelta
 from typing import Any
 
-from run_daily_digest import (
+from ai_news_skill.core.http_client import (
     USER_AGENT,
-    dedupe_items,
     fetch_json_url,
     fetch_text,
-    now_local,
     urlopen_with_outbound_proxy,
 )
+from ai_news_skill.pipeline.dedup import dedupe_items
+from ai_news_skill.pipeline.utils import now_local
 
 # --- taxonomy for docs / UI (not imported at runtime elsewhere) ---
 FEED_GROUPS: dict[str, tuple[str, ...]] = {

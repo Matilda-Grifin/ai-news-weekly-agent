@@ -1,3 +1,24 @@
+更新代码：cd /opt/ai-news/app && sudo -u ai-news bash -c 'export HOME=/opt/ai-news; git pull origin main'
+启动服务：sudo systemctl start ai-news-streamlit
+重启服务：sudo systemctl restart ai-news-streamlit
+看状态：sudo systemctl status ai-news-streamlit
+看日志：sudo journalctl -u ai-news-streamlit -f
+
+#查指标
+# 当天汇总
+python3 project/scripts/metrics_report.py
+
+# 指定日期
+python3 project/scripts/metrics_report.py --date 2026-04-14
+
+# 带每次运行明细
+python3 project/scripts/metrics_report.py --date 2026-04-14 --show-runs
+
+# JSON 输出（方便接看板）
+python3 project/scripts/metrics_report.py --date 2026-04-14 --json
+
+
+
 # Agent评估指标与公式说明（行业通行版，适配当前固定流水线）
 
 本版按你的反馈修正：不把项目硬说成“自主规划Agent”，而是按“固定流程新闻任务系统”来评估。

@@ -178,6 +178,63 @@ def _parse_query_list_json(raw: str) -> list[str]:
     return dedup[:16]
 
 
+def _contains_ai_topic(text: str) -> bool:
+    t = (text or "").lower()
+    if not t:
+        return False
+    return any(
+        x in t
+        for x in (
+            " ai ",
+            "ai新闻",
+            "ai 资讯",
+            "artificial intelligence",
+            "人工智能",
+            "大模型",
+            "llm",
+            "模型",
+        )
+    ) or t.startswith("ai") or t.endswith("ai") or (" ai" in t) or ("ai " in t)
+
+
+def _append_ai_anchor_keyword(keywords: list[str], intent_text: str) -> list[str]:
+    out = [str(k).strip() for k in (keywords or []) if str(k).strip()]
+    low = {k.lower() for k in out}
+    if _contains_ai_topic(intent_text) and "ai" not in low:
+        out.append("ai")
+    return out
+
+
+def _strict_match_keywords(plan_kw: list[str], intent_text: str) -> list[str]:
+    """Build robust keywords for strict filtering (includes AI anchors + short tokens)."""
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _add(k: str) -> None:
+        s = str(k or "").strip().lower()
+        if not s:
+            return
+        if s in seen:
+            return
+        seen.add(s)
+        out.append(s)
+
+    for k in plan_kw or []:
+        _add(str(k))
+    for k in extract_intent_keywords(intent_text):
+        _add(str(k))
+    for k in list(out):
+        if " " in k or "-" in k or "/" in k:
+            for part in re.split(r"[\s\-/]+", k):
+                p = (part or "").strip()
+                if len(p) >= 2:
+                    _add(p)
+    if _contains_ai_topic(intent_text):
+        for x in ("ai", "artificial intelligence", "人工智能", "大模型", "llm"):
+            _add(x)
+    return out[:20]
+
+
 def _expand_keywords_with_english_aliases(
     keywords: list[str],
     intent_text: str,
@@ -418,6 +475,7 @@ def intent_plan_stage(config: dict[str, Any], trace: dict[str, Any]) -> dict[str
     if not keywords:
         keywords = extract_intent_keywords(intent_for_llm if aug else intent_text)
     keywords = _expand_keywords_with_english_aliases(keywords, intent_text, config)
+    keywords = _append_ai_anchor_keyword(keywords, intent_text)
     lower_kw = [k.lower() for k in keywords]
     plan: dict[str, Any] = {
         "keywords": keywords,
@@ -437,6 +495,10 @@ def intent_plan_stage(config: dict[str, Any], trace: dict[str, Any]) -> dict[str
     keywords, lower_kw = merge_memory_keywords(keywords, lower_kw, config)
     plan["keywords"] = keywords
     _plan_extra = dict(plan)
+    _plan_extra["query_mode"] = str(config.get("_query_mode", ""))
+    qmd = config.get("_query_mode_debug")
+    if isinstance(qmd, dict):
+        _plan_extra["query_mode_debug"] = qmd
     _plan_extra["duration_ms"] = int((time.perf_counter() - _t_plan) * 1000)
     emit_step(config, trace, "intent_plan", "ok", extra=_plan_extra)
     return plan
@@ -899,7 +961,7 @@ def collect_stage(config: dict[str, Any], trace: dict[str, Any], intent_plan: di
         except Exception as ex:  # noqa: BLE001
             emit_step(config, trace, "public_api_feeds", "warn", f"{type(ex).__name__}: {str(ex)[:120]}")
 
-    keywords = [str(k).lower() for k in plan_kw]
+    keywords = _strict_match_keywords(plan_kw, intent_text)
 
     def _intent_hay(it: dict) -> str:
         return " ".join(
@@ -1020,6 +1082,7 @@ def collect_stage(config: dict[str, Any], trace: dict[str, Any], intent_plan: di
                     "items_before": items_before_filter,
                     "items_after": len(items),
                     "matched_count": len(matched),
+                    "query_mode": query_mode,
                 },
             )
         elif strict:
@@ -1034,7 +1097,7 @@ def collect_stage(config: dict[str, Any], trace: dict[str, Any], intent_plan: di
                 trace,
                 "collect_filter",
                 "warn",
-                extra={"keywords": keywords, "items_after": 0},
+                extra={"keywords": keywords, "items_after": 0, "query_mode": query_mode},
             )
         else:
             errors = list(errors)
@@ -1046,7 +1109,7 @@ def collect_stage(config: dict[str, Any], trace: dict[str, Any], intent_plan: di
                 trace,
                 "collect_filter",
                 "warn",
-                extra={"keywords": keywords, "items_after": len(items)},
+                extra={"keywords": keywords, "items_after": len(items), "query_mode": query_mode},
             )
     elif keywords and not items:
         emit_step(

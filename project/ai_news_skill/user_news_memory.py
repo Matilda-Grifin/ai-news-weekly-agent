@@ -294,10 +294,29 @@ def resolve_query_mode(intent_text: str, config: dict[str, Any]) -> str:
     2) lexical/regex baseline fallback (deterministic)
     """
     base = classify_query_mode(intent_text)
-    if not (intent_text or "").strip():
+    text = (intent_text or "").strip()
+    debug: dict[str, Any] = {
+        "intent_text": text[:300],
+        "base_mode": base,
+        "llm_enabled": False,
+        "llm_mode": None,
+        "final_mode": base,
+        "reason": "baseline_only",
+    }
+    if not text:
+        config["_query_mode_debug"] = debug
         return base
+    # Hard generic: explicit "casual browse" phrasing should not be tightened by LLM.
+    if _contains_any(text, _GENERIC_BROWSE_PHRASES):
+        debug["final_mode"] = "generic"
+        debug["reason"] = "hard_generic_browse_phrase"
+        config["_query_mode_debug"] = debug
+        return "generic"
     # Hard explicit: action + explicit topic should not be relaxed to generic by LLM.
-    if _contains_any(intent_text, _EXPLICIT_ACTION_HINTS) and _contains_any(intent_text, _EXPLICIT_TOPIC_HINTS):
+    if _contains_any(text, _EXPLICIT_ACTION_HINTS) and _contains_any(text, _EXPLICIT_TOPIC_HINTS):
+        debug["final_mode"] = "explicit"
+        debug["reason"] = "hard_explicit_action_topic"
+        config["_query_mode_debug"] = debug
         return "explicit"
     use_llm = (os.getenv("QUERY_MODE_USE_LLM", "true") or "true").strip().lower() not in (
         "0",
@@ -305,10 +324,18 @@ def resolve_query_mode(intent_text: str, config: dict[str, Any]) -> str:
         "no",
         "off",
     )
+    debug["llm_enabled"] = use_llm
     if use_llm:
         llm_mode = _llm_classify_query_mode(intent_text, config)
+        debug["llm_mode"] = llm_mode
         if llm_mode in ("generic", "explicit"):
+            debug["final_mode"] = llm_mode
+            debug["reason"] = "llm_override"
+            config["_query_mode_debug"] = debug
             return llm_mode
+    debug["final_mode"] = base
+    debug["reason"] = "fallback_baseline"
+    config["_query_mode_debug"] = debug
     return base
 
 
