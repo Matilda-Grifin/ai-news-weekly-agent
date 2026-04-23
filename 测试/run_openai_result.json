@@ -1,0 +1,31 @@
+{
+  "items": 3,
+  "errors": [
+    "Techmeme: rss_url empty",
+    "GNews: 已启用但未配置 gnews_api_key 或环境变量 GNEWS_API_KEY",
+    "LLM: ConfigError openai-compatible mode requires OPENAI_BASE_URL (or --llm-base-url)"
+  ],
+  "doc_path": "/Users/SL/Desktop/ai_news_skill/project/daily_docs/ai_weekly_20260423.md",
+  "run_dir": "/Users/SL/Desktop/ai_news_skill/project/runs/20260423_163039",
+  "trace_file": "/Users/SL/Desktop/ai_news_skill/project/runs/20260423_163039/trace.json",
+  "run_id": "20260423_163039",
+  "quality_gate": {
+    "field_completeness": 0.6667,
+    "duplicate_ratio": 0.0,
+    "latency_ms": 11260,
+    "compliance_ok": true,
+    "compliance_violations": [],
+    "thresholds": {
+      "min_field_completeness": 0.9,
+      "max_duplicate_ratio": 0.1,
+      "max_latency_ms": 120000,
+      "require_https": true
+    },
+    "pass_field_completeness": false,
+    "pass_dedup": true,
+    "pass_latency": true,
+    "pass_compliance": true,
+    "quality_passed": false
+  },
+  "is_effective_delivery": false
+}

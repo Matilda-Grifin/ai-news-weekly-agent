@@ -1,0 +1,383 @@
+{
+  "run_id": "20260423_163537",
+  "started_at": "2026-04-23T16:35:37.617015+08:00",
+  "steps": [
+    {
+      "name": "intent_plan",
+      "status": "started",
+      "detail": "查openai",
+      "time": "2026-04-23T16:35:37.617669+08:00"
+    },
+    {
+      "name": "intent_plan",
+      "status": "ok",
+      "detail": "",
+      "time": "2026-04-23T16:35:37.621529+08:00",
+      "extra": {
+        "keywords": [
+          "openai",
+          "ai"
+        ],
+        "intent_llm_used": false,
+        "prefer_categories": [],
+        "prefer_source_name_keywords": [],
+        "need_official_first": true,
+        "query_mode": "explicit",
+        "query_mode_debug": {
+          "intent_text": "查openai",
+          "base_mode": "explicit",
+          "llm_enabled": false,
+          "llm_mode": null,
+          "final_mode": "explicit",
+          "reason": "hard_explicit_action_topic"
+        },
+        "duration_ms": 3
+      }
+    },
+    {
+      "name": "load_sources",
+      "status": "started",
+      "detail": "reading /Users/SL/Desktop/ai_news_skill/sources.json",
+      "time": "2026-04-23T16:35:37.621650+08:00"
+    },
+    {
+      "name": "load_sources",
+      "status": "ok",
+      "detail": "",
+      "time": "2026-04-23T16:35:37.621945+08:00",
+      "extra": {
+        "source_count": 9,
+        "duration_ms": 0
+      }
+    },
+    {
+      "name": "intent_keywords",
+      "status": "ok",
+      "detail": "",
+      "time": "2026-04-23T16:35:37.621956+08:00",
+      "extra": {
+        "query_mode": "explicit",
+        "intent_keywords": [
+          "openai",
+          "ai"
+        ],
+        "memory_keywords": [],
+        "intent_text_preview": "查openai"
+      }
+    },
+    {
+      "name": "collect_plan",
+      "status": "ok",
+      "detail": "",
+      "time": "2026-04-23T16:35:37.621964+08:00",
+      "extra": {
+        "planned_sources": 9
+      }
+    },
+    {
+      "name": "site_crawl",
+      "status": "started",
+      "detail": "OpenAI Blog",
+      "time": "2026-04-23T16:35:37.753067+08:00"
+    },
+    {
+      "name": "site_crawl",
+      "status": "started",
+      "detail": "Anthropic Blog(OpenRSS)",
+      "time": "2026-04-23T16:35:37.753144+08:00"
+    },
+    {
+      "name": "site_crawl",
+      "status": "ok",
+      "detail": "",
+      "time": "2026-04-23T16:36:24.333475+08:00",
+      "extra": {
+        "source": "OpenAI Blog",
+        "items": 10,
+        "duration_ms": 46581
+      }
+    },
+    {
+      "name": "site_crawl",
+      "status": "started",
+      "detail": "Hugging Face Blog",
+      "time": "2026-04-23T16:36:24.334788+08:00"
+    },
+    {
+      "name": "site_crawl",
+      "status": "ok",
+      "detail": "",
+      "time": "2026-04-23T16:37:22.139223+08:00",
+      "extra": {
+        "source": "Anthropic Blog(OpenRSS)",
+        "items": 1,
+        "duration_ms": 104407
+      }
+    },
+    {
+      "name": "site_crawl",
+      "status": "started",
+      "detail": "TechCrunch AI",
+      "time": "2026-04-23T16:37:22.140558+08:00"
+    },
+    {
+      "name": "site_crawl",
+      "status": "ok",
+      "detail": "",
+      "time": "2026-04-23T16:37:36.643449+08:00",
+      "extra": {
+        "source": "TechCrunch AI",
+        "items": 0,
+        "duration_ms": 14504
+      }
+    },
+    {
+      "name": "site_crawl",
+      "status": "started",
+      "detail": "VentureBeat AI",
+      "time": "2026-04-23T16:37:36.645490+08:00"
+    },
+    {
+      "name": "site_crawl",
+      "status": "ok",
+      "detail": "",
+      "time": "2026-04-23T16:37:47.570077+08:00",
+      "extra": {
+        "source": "VentureBeat AI",
+        "items": 3,
+        "duration_ms": 10925
+      }
+    },
+    {
+      "name": "site_crawl",
+      "status": "started",
+      "detail": "Techmeme",
+      "time": "2026-04-23T16:37:47.571959+08:00"
+    },
+    {
+      "name": "site_crawl",
+      "status": "ok",
+      "detail": "",
+      "time": "2026-04-23T16:37:53.162710+08:00",
+      "extra": {
+        "source": "Techmeme",
+        "items": 3,
+        "duration_ms": 5591
+      }
+    },
+    {
+      "name": "site_crawl",
+      "status": "ok",
+      "detail": "",
+      "time": "2026-04-23T16:40:45.161555+08:00",
+      "extra": {
+        "source": "Hugging Face Blog",
+        "items": 6,
+        "duration_ms": 260855
+      }
+    },
+    {
+      "name": "collect_news",
+      "status": "started",
+      "detail": "",
+      "time": "2026-04-23T16:40:45.165430+08:00"
+    },
+    {
+      "name": "rss_source",
+      "status": "ok",
+      "detail": "阿里通义GitHub动态",
+      "time": "2026-04-23T16:40:45.971643+08:00",
+      "extra": {
+        "duration_ms": 804,
+        "seconds": 0.804,
+        "items": 0,
+        "ok": true,
+        "error_preview": ""
+      }
+    },
+    {
+      "name": "rss_source",
+      "status": "ok",
+      "detail": "腾讯混元GitHub动态",
+      "time": "2026-04-23T16:40:45.990035+08:00",
+      "extra": {
+        "duration_ms": 823,
+        "seconds": 0.823,
+        "items": 0,
+        "ok": true,
+        "error_preview": ""
+      }
+    },
+    {
+      "name": "rss_source",
+      "status": "ok",
+      "detail": "arXiv cs.AI",
+      "time": "2026-04-23T16:40:47.314556+08:00",
+      "extra": {
+        "duration_ms": 2149,
+        "seconds": 2.149,
+        "items": 20,
+        "ok": true,
+        "error_preview": ""
+      }
+    },
+    {
+      "name": "rss_fetch",
+      "status": "ok",
+      "detail": "",
+      "time": "2026-04-23T16:40:47.315043+08:00",
+      "extra": {
+        "sources": 3,
+        "rss_items": 20,
+        "rss_errs": 0,
+        "wall_ms": 2149
+      }
+    },
+    {
+      "name": "collect_filter",
+      "status": "ok",
+      "detail": "",
+      "time": "2026-04-23T16:40:47.315911+08:00",
+      "extra": {
+        "mode": "explicit",
+        "keywords": [
+          "openai",
+          "ai",
+          "artificial intelligence",
+          "人工智能",
+          "大模型",
+          "llm"
+        ],
+        "items_before": 43,
+        "items_after": 37,
+        "matched_count": 37,
+        "query_mode": "explicit"
+      }
+    },
+    {
+      "name": "collect_news",
+      "status": "ok",
+      "detail": "",
+      "time": "2026-04-23T16:40:47.315930+08:00",
+      "extra": {
+        "items": 37,
+        "errors": 1,
+        "duration_ms": 2150
+      }
+    },
+    {
+      "name": "cap_per_category",
+      "status": "ok",
+      "detail": "",
+      "time": "2026-04-23T16:40:47.316209+08:00",
+      "extra": {
+        "max_per": 5,
+        "items_after": 16
+      }
+    },
+    {
+      "name": "balance_items",
+      "status": "ok",
+      "detail": "",
+      "time": "2026-04-23T16:40:47.316456+08:00",
+      "extra": {
+        "items_after": 13
+      }
+    },
+    {
+      "name": "source_cap",
+      "status": "ok",
+      "detail": "",
+      "time": "2026-04-23T16:40:47.316469+08:00",
+      "extra": {
+        "max_per_source": 1,
+        "items_after": 6
+      }
+    },
+    {
+      "name": "final_cap",
+      "status": "ok",
+      "detail": "",
+      "time": "2026-04-23T16:40:47.316477+08:00",
+      "extra": {
+        "max_items": 10,
+        "items_after": 6
+      }
+    },
+    {
+      "name": "fetch_article_body",
+      "status": "started",
+      "detail": "trafilatura / 正文兜底",
+      "time": "2026-04-23T16:40:47.316498+08:00"
+    },
+    {
+      "name": "fetch_article_body",
+      "status": "ok",
+      "detail": "",
+      "time": "2026-04-23T16:40:48.337130+08:00",
+      "extra": {
+        "items": 6,
+        "duration_ms": 1020
+      }
+    },
+    {
+      "name": "llm_enrich",
+      "status": "started",
+      "detail": "",
+      "time": "2026-04-23T16:40:48.337159+08:00"
+    },
+    {
+      "name": "llm_enrich",
+      "status": "warn",
+      "detail": "ConfigError: openai-compatible mode requires OPENAI_BASE_URL (or --llm-base-url)",
+      "time": "2026-04-23T16:40:48.337205+08:00",
+      "extra": {
+        "duration_ms": 0
+      }
+    },
+    {
+      "name": "render_and_write",
+      "status": "ok",
+      "detail": "/Users/SL/Desktop/ai_news_skill/project/daily_docs/ai_weekly_20260423.md",
+      "time": "2026-04-23T16:40:48.339885+08:00",
+      "extra": {
+        "duration_ms": 2
+      }
+    }
+  ],
+  "status": "ok",
+  "dedup_raw_count": 43,
+  "dedup_unique_count": 43,
+  "ended_at": "2026-04-23T16:40:48.340202+08:00",
+  "elapsed_seconds": 310.723,
+  "result": {
+    "items": 6,
+    "errors": [
+      "GNews: 已启用但未配置 gnews_api_key 或环境变量 GNEWS_API_KEY",
+      "LLM: ConfigError openai-compatible mode requires OPENAI_BASE_URL (or --llm-base-url)"
+    ],
+    "doc_path": "/Users/SL/Desktop/ai_news_skill/project/daily_docs/ai_weekly_20260423.md",
+    "run_dir": "/Users/SL/Desktop/ai_news_skill/project/runs/20260423_163537",
+    "trace_file": "/Users/SL/Desktop/ai_news_skill/project/runs/20260423_163537/trace.json",
+    "run_id": "20260423_163537",
+    "quality_gate": {
+      "field_completeness": 0.8333,
+      "duplicate_ratio": 0.0,
+      "latency_ms": 310722,
+      "compliance_ok": true,
+      "compliance_violations": [],
+      "thresholds": {
+        "min_field_completeness": 0.9,
+        "max_duplicate_ratio": 0.1,
+        "max_latency_ms": 120000,
+        "require_https": true
+      },
+      "pass_field_completeness": false,
+      "pass_dedup": true,
+      "pass_latency": false,
+      "pass_compliance": true,
+      "quality_passed": false
+    },
+    "is_effective_delivery": false
+  }
+}
