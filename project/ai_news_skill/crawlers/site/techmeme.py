@@ -7,7 +7,8 @@ from typing import Any
 
 from bs4 import BeautifulSoup
 
-from run_daily_digest import strip_html, urlopen_with_outbound_proxy
+from ai_news_skill.core.http_client import urlopen_with_outbound_proxy
+from ai_news_skill.pipeline.utils import strip_html
 
 from .base import CrawledItem, playwright_chromium_launch_kwargs
 
@@ -176,14 +177,23 @@ class TechmemeCrawler:
 
             source_name = (c.get("source_name", "") or "").strip()
             source = f"Techmeme / {source_name}" if source_name else "Techmeme"
-            summary = detail.get("summary", "") or c.get("summary", "")
+            summary = _summary_with_min_words(
+                detail.get("summary", "") or c.get("summary", ""),
+                detail.get("content_excerpt", ""),
+                min_words=200,
+                max_chars=3000,
+            )
+            if _word_count(summary) < 200:
+                continue
+            if not (published or "").strip():
+                continue
             out.append(
                 CrawledItem(
                     source=source,
                     category="行业资讯",
                     title=(detail.get("title", "") or c.get("title", ""))[:300],
                     link=href,
-                    summary=summary[:500],
+                    summary=summary,
                     published=published,
                     content_excerpt=detail.get("content_excerpt", "")[:4000],
                 )
@@ -373,6 +383,29 @@ def _extract_summary_from_block(block: Any, title: str) -> str:
     return t[:500]
 
 
+def _word_count(text: str) -> int:
+    s = (text or "").strip()
+    if not s:
+        return 0
+    return len([w for w in re.split(r"\s+", s) if w])
+
+
+def _summary_with_min_words(
+    primary_summary: str, fallback_excerpt: str, *, min_words: int = 200, max_chars: int = 3000
+) -> str:
+    s = re.sub(r"\s+", " ", (primary_summary or "").strip())
+    if _word_count(s) >= min_words:
+        return s[:max_chars]
+    extra = re.sub(r"\s+", " ", (fallback_excerpt or "").strip())
+    if not extra:
+        return s[:max_chars]
+    merged = (s + " " + extra).strip() if s else extra
+    words = [w for w in re.split(r"\s+", merged) if w]
+    if len(words) <= min_words:
+        return " ".join(words)[:max_chars]
+    return " ".join(words[:min_words])[:max_chars]
+
+
 def _extract_search_datetime(text: str) -> str:
     t = text or ""
     m = re.search(
@@ -426,6 +459,8 @@ def _parse_dt(raw: str) -> datetime | None:
 def _fetch_external_detail(url: str, *, allow_insecure_fallback: bool) -> dict[str, str] | None:
     html = _fetch_html(url, timeout=18, allow_insecure_fallback=allow_insecure_fallback)
     if not html.strip():
+        html = _fetch_html_playwright(url, timeout_ms=22000) or ""
+    if not html.strip():
         return None
     soup = BeautifulSoup(html, "html.parser")
 
@@ -469,6 +504,20 @@ def _fetch_external_detail(url: str, *, allow_insecure_fallback: bool) -> dict[s
 
     body_text = soup.get_text(" ", strip=True)
     body_text = re.sub(r"\s+", " ", body_text).strip()
+    if not published and body_text:
+        published = _extract_search_datetime(body_text)
+    if not published and body_text:
+        m_date = re.search(
+            r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},\s+\d{4}\b",
+            body_text,
+            flags=re.I,
+        )
+        if m_date:
+            published = m_date.group(0)
+    if not published:
+        m_url_date = re.search(r"/(20\d{2})[/-](\d{1,2})[/-](\d{1,2})/", url or "")
+        if m_url_date:
+            published = f"{m_url_date.group(1)}-{int(m_url_date.group(2)):02d}-{int(m_url_date.group(3)):02d}"
     excerpt = body_text[:4000] if body_text else ""
 
     if not title and not summary and not excerpt:

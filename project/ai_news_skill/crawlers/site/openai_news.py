@@ -9,7 +9,8 @@ from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
 
-from run_daily_digest import strip_html
+from ai_news_skill.core.http_client import fetch_text
+from ai_news_skill.pipeline.utils import strip_html
 
 from .base import CrawledItem, playwright_chromium_launch_kwargs
 
@@ -139,8 +140,6 @@ def _collect_openai_news_links(
 
     if len(by_url) < 1:
         try:
-            from run_daily_digest import fetch_text
-
             raw = fetch_text(
                 url,
                 timeout=min(20, max(10, timeout_ms // 2000)),
@@ -152,8 +151,6 @@ def _collect_openai_news_links(
 
     if len(by_url) < 1:
         try:
-            from run_daily_digest import fetch_text
-
             raw = fetch_text(
                 "https://openai.com/news/rss.xml",
                 timeout=22,

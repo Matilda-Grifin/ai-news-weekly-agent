@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
 
-from run_daily_digest import strip_html
+from ai_news_skill.pipeline.utils import strip_html
 
 from .base import CrawledItem, playwright_chromium_launch_kwargs
 

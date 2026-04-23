@@ -21,7 +21,7 @@ def playwright_site_headless() -> bool:
 
 def playwright_chromium_launch_kwargs() -> dict[str, Any]:
     """Playwright chromium.launch(...) 参数：无头 + 可选出站代理（Webshare 受 OUTBOUND_WEBSHARE_SCOPES 约束，默认含 playwright）。"""
-    from run_daily_digest import playwright_proxy_for_browser
+    from ai_news_skill.core.http_client import playwright_proxy_for_browser
 
     kw: dict[str, Any] = {"headless": playwright_site_headless()}
     px = playwright_proxy_for_browser()

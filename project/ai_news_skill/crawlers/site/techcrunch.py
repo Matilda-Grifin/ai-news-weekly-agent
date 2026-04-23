@@ -7,7 +7,8 @@ from typing import Any
 
 from bs4 import BeautifulSoup
 
-from run_daily_digest import strip_html, urlopen_with_outbound_proxy
+from ai_news_skill.core.http_client import urlopen_with_outbound_proxy
+from ai_news_skill.pipeline.utils import strip_html
 
 from .base import CrawledItem, playwright_chromium_launch_kwargs
 
