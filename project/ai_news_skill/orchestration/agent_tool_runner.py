@@ -6,7 +6,12 @@ import json
 import pathlib
 from typing import Any
 
-from langchain.agents import AgentExecutor, create_tool_calling_agent
+try:
+    from langchain.agents import AgentExecutor, create_tool_calling_agent
+except ImportError:
+    # LangChain API changed across versions; keep compatibility with older/newer layouts.
+    from langchain.agents.agent import AgentExecutor  # type: ignore
+    from langchain.agents.tool_calling_agent.base import create_tool_calling_agent  # type: ignore
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.tools import tool
 
@@ -17,10 +22,11 @@ from ai_news_skill.integrations.mcp_bridge import (
     server_params_from_dict,
 )
 from ai_news_skill.orchestration.langgraph_agent import run_with_graph
+from ai_news_skill.pipeline.llm_client import resolve_llm_runtime
+from ai_news_skill.pipeline.openclaw import fetch_openclaw_stars_top
 from mcp.client.session_group import ClientSessionGroup, ClientSessionParameters
 from middleware.pipeline_middleware import log_pipeline_event
 from model.llm_factory import build_chat_openai
-from run_daily_digest import resolve_llm_runtime
 
 
 def _build_runtime_namespace(config: dict[str, Any]) -> Any:
@@ -120,8 +126,6 @@ def run_with_tool_agent(
     @tool
     def fetch_openclaw_with_context(focus_skill: str = "") -> str:
         """Fetch OpenClaw leaderboard. Use only when user explicitly asks for OpenClaw/top skills ranking."""
-        from run_daily_digest import fetch_openclaw_stars_top
-
         top, focus, asof = fetch_openclaw_stars_top(
             top_n=3,
             focus_skill=focus_skill or str(base_config.get("focus_skill", "")),

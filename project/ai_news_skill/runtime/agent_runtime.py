@@ -34,13 +34,13 @@ from ai_news_skill.user_news_memory import (
 # Pipeline and HTTP functions now imported from modular locations
 from ai_news_skill.pipeline.dedup import dedupe_items, cap_items_per_category, cap_items_per_source, cap_papers_by_ratio, balance_items
 from ai_news_skill.pipeline.intent import extract_intent_keywords
-from ai_news_skill.pipeline.rss import collect_news, load_sources
+from ai_news_skill.pipeline.rss import collect_news
 from ai_news_skill.pipeline.gnews import fetch_gnews_articles, fetch_gnews_for_pipeline, infer_gnews_search_query
 from ai_news_skill.pipeline.openclaw import fetch_openclaw_stars_top
 from ai_news_skill.pipeline.enrich import enrich_items_with_llm
 from ai_news_skill.pipeline.llm_client import llm_extract_intent_search_queries, resolve_llm_runtime
 from ai_news_skill.pipeline.markdown_writer import render_markdown, write_doc
-from ai_news_skill.pipeline.utils import now_local
+from ai_news_skill.pipeline.utils import load_sources, now_local
 from ai_news_skill.pipeline.content import attach_content_excerpts_to_items
 
 _LOG = logging.getLogger(__name__)
